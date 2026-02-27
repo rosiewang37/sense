@@ -36,7 +36,9 @@ frontend/          React 19 + Vite + TailwindCSS + TanStack Query
 **For LLM features:**
 - A **Backboard API key** (from [backboard.io](https://backboard.io))
 
-## Quick Start (Tests Only — No Docker Needed)
+## Setup
+
+### 1. Backend (Python)
 
 ```bash
 cd backend
@@ -44,24 +46,23 @@ python -m venv venv
 venv\Scripts\activate      # Windows
 # source venv/bin/activate  # macOS/Linux
 pip install -r requirements.txt
+```
+
+### 2. Run Tests (no PostgreSQL needed)
+
+Tests use an in-memory SQLite database — no external services required:
+
+```bash
 pytest tests/ -v --tb=short   # 53 tests, all pass
 ```
 
-This runs the full test suite using SQLite. No PostgreSQL or Docker required.
+### 3. PostgreSQL (required to run the app)
 
-## Full App Setup
+Tests work without PostgreSQL, but running the actual app requires it for pgvector embedding search.
 
-### 1. Start PostgreSQL
+**Option A — Local install (recommended):**
 
-**Option A — Docker:**
-
-```bash
-docker compose up postgres -d
-```
-
-**Option B — Local install:**
-
-Install PostgreSQL with pgvector, then create the database:
+Install [PostgreSQL 16](https://www.postgresql.org/download/) with pgvector, then create the database:
 
 ```sql
 CREATE DATABASE sense;
@@ -69,37 +70,32 @@ CREATE DATABASE sense;
 CREATE EXTENSION IF NOT EXISTS vector;
 ```
 
-### 2. Backend Setup
+**Option B — Docker (if you have it):**
+
+```bash
+docker compose up postgres -d
+```
+
+### 4. Configure Environment
+
+Edit `.env` in the project root with your PostgreSQL credentials:
+
+```
+DATABASE_URL=postgresql+asyncpg://sense:sense@localhost:5432/sense
+DATABASE_URL_SYNC=postgresql://sense:sense@localhost:5432/sense
+```
+
+### 5. Database Migrations
 
 ```bash
 cd backend
-python -m venv venv
-venv\Scripts\activate      # Windows
-# source venv/bin/activate  # macOS/Linux
-pip install -r requirements.txt
 
-# Copy and configure environment
-cp ../.env.example .env
-# Edit .env with your database URL, Backboard API key, etc.
-```
-
-### 3. Database Migrations
-
-```bash
-cd backend
-
-# Run Alembic migrations (requires PostgreSQL running)
-alembic upgrade head
-```
-
-If you don't have Alembic migrations generated yet, create the initial one:
-
-```bash
+# Generate and run migrations (requires PostgreSQL running)
 alembic revision --autogenerate -m "initial"
 alembic upgrade head
 ```
 
-### 4. Start the Backend
+### 6. Start the Backend
 
 ```bash
 cd backend
@@ -116,7 +112,7 @@ GET http://localhost:8000/health/db
 Background tasks (event processing, verification) run in-process via FastAPI BackgroundTasks.
 Periodic correlation runs automatically via APScheduler (every 2 minutes).
 
-### 5. Frontend Setup
+### 7. Frontend
 
 ```bash
 cd frontend
