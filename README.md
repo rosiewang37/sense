@@ -199,3 +199,19 @@ Copy `.env.example` to `backend/.env` and configure:
 | Embeddings | Gemini text-embedding-004 (768 dim) |
 | Frontend | React 19 + Vite + TailwindCSS + TanStack Query |
 | Auth | Simple JWT |
+
+
+Local run Workflow
+# 1. Start DB + backend
+docker compose up -d
+
+# 2. Migrations (only needed after schema changes)
+docker exec sense-backend-1 sh -c "cd /app && PYTHONPATH=/app alembic upgrade head"
+
+# 3. Start frontend
+cd frontend && npm run dev
+
+# 4. Verify
+curl http://localhost:8000/health        # {"status":"ok","service":"Sense"}
+curl http://localhost:8000/health/db     # {"status":"ok","database":"connected"}
+# Open http://localhost:5173 — register/login works

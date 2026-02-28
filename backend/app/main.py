@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import get_db
+import app.models  # noqa: F401 — registers all ORM models in mapper registry at startup
 from app.api.auth import router as auth_router
 from app.api.webhooks import router as webhooks_router
 from app.api.knowledge import router as knowledge_router
