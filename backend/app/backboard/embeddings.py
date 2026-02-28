@@ -1,11 +1,4 @@
-"""Embedding generation.
-
-Backboard API does not expose a standalone embedding endpoint — embeddings are
-used internally for RAG/memory. This module returns None for now, meaning
-correlation will rely on actor, temporal, and reference scoring only (no
-semantic similarity). When a direct embedding provider is configured, this
-module can be updated to call it.
-"""
+"""Embedding generation via Backboard API (Gemini embedding, 768 dims)."""
 import logging
 import struct
 
@@ -13,10 +6,10 @@ logger = logging.getLogger(__name__)
 
 
 async def generate_embedding(text: str) -> bytes | None:
-    """Generate an embedding for text and return as bytes.
+    """Generate a 768-dim embedding for text and return as bytes.
 
-    Currently returns None because Backboard API has no standalone embedding
-    endpoint. Correlation still works via actor, temporal, and reference scoring.
+    Uses the Backboard API with Gemini embedding model.
+    Returns None on failure.
     """
     if not text or not text.strip():
         return None

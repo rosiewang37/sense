@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useKnowledgeList } from '../hooks/useKnowledge';
 import KnowledgeCard from '../components/knowledge/KnowledgeCard';
 import FilterBar from '../components/knowledge/FilterBar';
@@ -7,15 +7,21 @@ import FilterBar from '../components/knowledge/FilterBar';
 export default function KnowledgePage() {
   const [typeFilter, setTypeFilter] = useState('');
   const { data, isLoading, error } = useKnowledgeList({ type: typeFilter || undefined });
+  const navigate = useNavigate();
+  function logout() {
+    localStorage.removeItem('token');
+    navigate('/login');
+  }
 
   return (
     <div className="flex flex-col h-screen">
       <header className="bg-gray-900 text-white px-6 py-3 flex items-center justify-between">
         <h1 className="text-lg font-semibold">Sense</h1>
-        <nav className="flex gap-4 text-sm">
+        <nav className="flex gap-4 text-sm items-center">
           <Link to="/chat" className="text-gray-400 hover:text-white">Chat</Link>
           <Link to="/knowledge" className="text-white font-medium">Knowledge</Link>
           <Link to="/settings" className="text-gray-400 hover:text-white">Settings</Link>
+          <button onClick={logout} className="text-gray-400 hover:text-white ml-2">Logout</button>
         </nav>
       </header>
       <main className="flex-1 overflow-y-auto bg-gray-50 p-6">

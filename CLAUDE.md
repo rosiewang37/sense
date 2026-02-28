@@ -4,42 +4,26 @@
 
 Sense is a cross-platform engineering memory system with active verification. It ingests events from Slack and GitHub, extracts structured Knowledge Objects, correlates related events across tools, dispatches AI agents to verify implementation, and exposes everything through a chat interface and dashboard.
 
-## Source of Truth Documents
+## Current State
 
-Read these documents BEFORE writing any code. They contain all specifications:
+The system is past initial build phases and is now in **iteration mode**. The core pipeline is running:
+- Slack + GitHub webhooks receiving events
+- Knowledge extraction pipeline (pre-filter → classify → extract)
+- Knowledge Objects shown on the frontend Knowledge page
+- Chat page exists but needs fixes
 
-1. **`docs/PRD.md`** — WHAT to build: core concepts, MVP features, user flows, MVP scope, build priority/cut order, and TDD development protocol
-2. **`docs/TECHNICAL_SPEC.md`** — HOW to build: architecture, tech stack, data model (SQL schemas), ingestion layer, extraction pipeline, correlation algorithm, agent implementations (tools + system prompts + execution loops), API endpoints, frontend architecture, project directory structure
-3. **`docs/ROADMAP.md`** — WHEN to build: phase-by-phase task breakdown (Phases 1-6), tests for each phase, day-by-day schedule, deliverables per phase
-4. **`docs/BACKBOARD_API.md`** — Backboard API reference: authentication, endpoints (assistants, threads, messages, documents, memory, models), tool/function calling workflow, SDK usage, streaming, model identifiers
+**Active docs for reference:**
+- **`docs/BACKBOARD_API.md`** — Backboard API reference (authentication, assistants, threads, messages, tool calling, streaming)
+- **`docs/TECHNICAL_SPEC.md`** — Architecture, data model, agent system prompts, and tool definitions
+- **`docs/PRD.md`** — Product requirements and user flows
 
-## Build Order
+## Iteration Development Rules
 
-Follow the ROADMAP phases sequentially. Each phase has a task list, required tests, and a deliverable:
-
-- **Phase 1:** Foundation & Infrastructure (FastAPI, PostgreSQL+pgvector, Redis+Celery, React+Vite+Tailwind, JWT auth, Docker Compose)
-- **Phase 2:** Integration Connectors (Slack + GitHub webhooks, event parsing, embeddings)
-- **Phase 3:** Knowledge Extraction Engine (pre-filter, LLM classification, LLM extraction)
-- **Phase 4:** Cross-Tool Correlation Engine (scoring functions, merge logic)
-- **Phase 5:** Verification Agent (agent tools, execution loop, auto-dispatch after KO creation)
-- **Phase 6:** Investigative Chat Agent & Dashboard (streaming chat, reasoning toggle, knowledge feed, verification panel)
-
-## Development Protocol (MANDATORY)
-
-Follow the TDD workflow defined in `docs/PRD.md` Section 7:
-
-1. Write test(s) for the feature FIRST
-2. Run tests — expect FAIL (confirms test is valid)
-3. Implement the feature
-4. Run tests — if FAIL, fix (max 3 attempts per failing test)
-5. After 3 consecutive failures on the same test: log to `BLOCKED.md` and move on
-
-Rules:
-- Each fix attempt must change something (no identical retries)
-- Tests must be independent (a blocked feature must not block other tests)
-- Use pytest + pytest-asyncio. Run: `pytest tests/ -v --tb=short`
-- Mock all LLM calls in tests (record real responses once, replay in tests)
-- Use a separate test database with fixtures via conftest.py
+- Read existing code before modifying it — understand what's there first
+- Make targeted, minimal changes — don't refactor beyond what's needed
+- Don't break working functionality while fixing something else
+- When adding DB columns, always create an Alembic migration in `backend/alembic/versions/`
+- Run: `pytest tests/ -v --tb=short` to verify changes don't break tests
 
 ## Tech Stack
 

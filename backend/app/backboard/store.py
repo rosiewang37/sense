@@ -93,3 +93,102 @@ async def store_verification_check(
     db.add(check)
     await db.flush()
     return check
+
+
+async def search_knowledge_objects(
+    db: AsyncSession,
+    query: str,
+    type_filter: str | None = None,
+    limit: int = 5,
+) -> list[dict]:
+    """Full-text search over knowledge objects by title + summary.
+
+    Used by the investigative chat agent to answer user questions.
+    """
+    stmt = select(KnowledgeObject).where(KnowledgeObject.status != "merged")
+    if type_filter and type_filter != "any":
+        stmt = stmt.where(KnowledgeObject.type == type_filter)
+    stmt = stmt.order_by(KnowledgeObject.detected_at.desc()).limit(limit * 4)
+
+    result = await db.execute(stmt)
+    kos = result.scalars().all()
+
+    # Client-side text match (no full-text index yet)
+    query_lower = query.lower()
+    scored = []
+    for ko in kos:
+        text = f"{ko.title or ''} {ko.summary or ''}".lower()
+        if any(word in text for word in query_lower.split()):
+            scored.append(ko)
+
+    scored = scored[:limit]
+    return [
+        {
+            "id": str(ko.id),
+            "type": ko.type,
+            "title": ko.title,
+            "summary": ko.summary,
+            "confidence": ko.confidence,
+            "status": ko.status,
+            "detected_at": ko.detected_at.isoformat() if hasattr(ko.detected_at, "isoformat") else str(ko.detected_at or ""),
+        }
+        for ko in scored
+    ]
+
+
+async def search_events(
+    db: AsyncSession,
+    query: str,
+    source: str | None = None,
+    limit: int = 5,
+) -> list[dict]:
+    """Full-text search over raw ingested events.
+
+    Used by the investigative chat agent.
+    """
+    stmt = select(Event)
+    if source and source != "any":
+        stmt = stmt.where(Event.source == source)
+    stmt = stmt.order_by(Event.ingested_at.desc()).limit(limit * 4)
+
+    result = await db.execute(stmt)
+    events = result.scalars().all()
+
+    query_lower = query.lower()
+    scored = []
+    for ev in events:
+        text = (ev.content or "").lower()
+        if any(word in text for word in query_lower.split()):
+            scored.append(ev)
+
+    scored = scored[:limit]
+    return [
+        {
+            "id": str(ev.id),
+            "source": ev.source,
+            "event_type": ev.event_type,
+            "actor_name": ev.actor_name,
+            "content": (ev.content or "")[:500],
+            "occurred_at": ev.occurred_at.isoformat() if hasattr(ev.occurred_at, "isoformat") else str(ev.occurred_at or ""),
+        }
+        for ev in scored
+    ]
+
+
+async def get_verification_checks_for_ko(
+    db: AsyncSession, knowledge_id: str
+) -> list[dict]:
+    """Get all verification checks for a KO."""
+    result = await db.execute(
+        select(VerificationCheck).where(VerificationCheck.knowledge_id == knowledge_id)
+    )
+    checks = result.scalars().all()
+    return [
+        {
+            "description": c.description,
+            "status": c.status,
+            "evidence": c.evidence,
+            "suggestion": c.suggestion,
+        }
+        for c in checks
+    ]

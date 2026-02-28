@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     slack_client_id: str = ""
     slack_client_secret: str = ""
     slack_signing_secret: str = ""
+    slack_bot_token: str = ""
     github_app_id: str = ""
     github_private_key: str = ""
     github_webhook_secret: str = ""

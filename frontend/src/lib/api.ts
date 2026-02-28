@@ -10,6 +10,10 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   const res = await fetch(`${BASE_URL}${path}`, { ...options, headers });
   if (!res.ok) {
+    if (res.status === 401) {
+      localStorage.removeItem('token');
+      window.location.href = '/login';
+    }
     const error = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(error.detail || 'Request failed');
   }

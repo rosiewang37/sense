@@ -1,11 +1,22 @@
-import { useState } from 'react';
-import { useChat } from '../../hooks/useChat';
+import { useState, useEffect, useRef } from 'react';
+import { useChat, type ChatState } from '../../hooks/useChat';
 import AgentStep from './AgentStep';
 
-export default function ChatInterface() {
-  const { messages, isLoading, sendMessage } = useChat();
+interface Props {
+  chatState: ChatState;
+  setChatState: React.Dispatch<React.SetStateAction<ChatState>>;
+}
+
+export default function ChatInterface({ chatState, setChatState }: Props) {
+  const { messages, isLoading, sendMessage } = useChat(chatState, setChatState);
   const [input, setInput] = useState('');
   const [showReasoning, setShowReasoning] = useState(true);
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to bottom when messages change
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -31,19 +42,24 @@ export default function ChatInterface() {
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {messages.length === 0 && (
+        {messages.length === 0 && !chatState.historyLoaded && (
+          <div className="text-center text-gray-400 mt-20">
+            <p className="text-sm">Loading conversation history…</p>
+          </div>
+        )}
+        {messages.length === 0 && chatState.historyLoaded && (
           <div className="text-center text-gray-400 mt-20">
             <p className="text-lg font-medium">Ask Sense anything</p>
-            <p className="text-sm mt-2">Try: "Why did we switch motor suppliers?"</p>
+            <p className="text-sm mt-2">Try: "What decisions did we make this week?"</p>
           </div>
         )}
         {messages.map((msg, i) => (
-          <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+          <div key={msg.id ?? i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
             <div
-              className={`max-w-2xl rounded-lg px-4 py-3 ${
+              className={`max-w-2xl rounded-2xl px-4 py-3 ${
                 msg.role === 'user'
                   ? 'bg-gray-900 text-white'
-                  : 'bg-white border shadow-sm'
+                  : 'bg-white border shadow-sm text-gray-800'
               }`}
             >
               {/* Agent reasoning steps */}
@@ -54,21 +70,19 @@ export default function ChatInterface() {
                   ))}
                 </div>
               )}
-              {/* Message content */}
-              <div className="whitespace-pre-wrap">{msg.content}</div>
-            </div>
-          </div>
-        ))}
-        {isLoading && messages[messages.length - 1]?.role === 'user' && (
-          <div className="flex justify-start">
-            <div className="bg-white border shadow-sm rounded-lg px-4 py-3 text-gray-400">
-              <div className="flex items-center gap-2">
-                <span className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse" />
-                Investigating...
+              {/* Message content — show pulse if assistant is still streaming */}
+              <div className="whitespace-pre-wrap">
+                {msg.content || (msg.role === 'assistant' && isLoading ? (
+                  <span className="inline-flex items-center gap-1 text-gray-400">
+                    <span className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse" />
+                    Investigating…
+                  </span>
+                ) : null)}
               </div>
             </div>
           </div>
-        )}
+        ))}
+        <div ref={bottomRef} />
       </div>
 
       {/* Input */}
@@ -78,7 +92,7 @@ export default function ChatInterface() {
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask about your project history..."
+            placeholder="Ask about your project history…"
             className="flex-1 px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900"
             disabled={isLoading}
           />

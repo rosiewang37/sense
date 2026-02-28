@@ -54,7 +54,19 @@ async def process_event_async(event_data: dict) -> dict:
             logger.info(f"Event {event_id} filtered out (not significant)")
             return {"event_id": event_id, "ko_created": False}
 
-        # Step 4: Store Knowledge Object
+        # Step 4: For GitHub events, try to link to an existing decision KO
+        # instead of creating a separate standalone KO.
+        if event_data.get("source") == "github":
+            linked_ko_id = await _find_and_link_to_existing_decision(
+                db, event_id, event_data
+            )
+            if linked_ko_id:
+                logger.info(
+                    f"GitHub event {event_id} linked as evidence to decision KO {linked_ko_id}"
+                )
+                return {"event_id": event_id, "ko_created": False, "linked_ko_id": linked_ko_id}
+
+        # Step 4b: Store as a new Knowledge Object
         ko_data["occurred_at"] = event_data.get("occurred_at")
         ko_data["project_id"] = event_data.get("project_id")
         ko_data["participants"] = _extract_participants(event_data)
@@ -97,6 +109,85 @@ def _extract_participants(event_data: dict) -> list[dict]:
             "role": "author",
         })
     return participants
+
+
+async def _find_and_link_to_existing_decision(
+    db, event_id: str, event_data: dict
+) -> str | None:
+    """Check if a GitHub event's content correlates with a recent decision KO.
+
+    If a match is found above the threshold, links the event as evidence to
+    the existing decision and returns its ID. Returns None if no match found.
+    """
+    from app.backboard.store import get_recent_knowledge
+    from app.backboard.embeddings import generate_embedding, bytes_to_vector
+    from app.backboard.models import KnowledgeEvent
+    from app.sense.correlation import weighted_correlation_score, MERGE_THRESHOLD
+
+    # Only look at decision KOs from the past 7 days
+    since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    recent_kos = await get_recent_knowledge(db, project_id=event_data.get("project_id"), since=since)
+    decision_kos = [ko for ko in recent_kos if ko.type == "decision"]
+
+    if not decision_kos:
+        return None
+
+    # Generate embedding for the GitHub event content
+    content = event_data.get("content", "")
+    event_embedding_bytes = await generate_embedding(content) if content else None
+    event_vector = bytes_to_vector(event_embedding_bytes) if event_embedding_bytes else []
+
+    # Get actors from the event
+    actors_event = set()
+    if event_data.get("actor_email"):
+        actors_event.add(event_data["actor_email"])
+
+    best_score = 0.0
+    best_ko = None
+
+    for ko in decision_kos:
+        ko_vector = bytes_to_vector(ko.embedding) if ko.embedding else []
+        actors_ko = {p.get("email", "") for p in (ko.participants or []) if p.get("email")}
+
+        # Use a generous time window (7 days) — GitHub commits can happen days after a decision
+        score = weighted_correlation_score(
+            event_vector, ko_vector,
+            actors_event, actors_ko,
+            time_diff_seconds=0,  # Don't penalise time; decisions precede implementation
+            content_a=content,
+            content_b=f"{ko.title or ''} {ko.summary or ''}",
+            window_hours=168,  # 7 days
+        )
+
+        if score > best_score:
+            best_score = score
+            best_ko = ko
+
+    # Link threshold — slightly lower than merge threshold so we catch related commits
+    LINK_THRESHOLD = MERGE_THRESHOLD * 0.75  # ~0.45
+
+    if best_ko and best_score >= LINK_THRESHOLD:
+        # Link this event as evidence to the existing decision KO
+        from sqlalchemy import select
+        existing_link = await db.execute(
+            select(KnowledgeEvent).where(
+                KnowledgeEvent.knowledge_id == str(best_ko.id),
+                KnowledgeEvent.event_id == event_id,
+            )
+        )
+        if not existing_link.scalar_one_or_none():
+            link = KnowledgeEvent(
+                knowledge_id=str(best_ko.id),
+                event_id=event_id,
+                relevance=best_score,
+                relationship_="github_evidence",
+            )
+            db.add(link)
+            await db.commit()
+
+        return str(best_ko.id)
+
+    return None
 
 
 async def run_verification_async(ko_id: str) -> dict:
@@ -162,12 +253,10 @@ async def run_correlation_async() -> dict:
                 ko_a = kos[i]
                 ko_b = kos[j]
 
-                # Get embeddings
+                # Get embeddings (may be empty — correlation still works
+                # via actor, temporal, and reference scoring)
                 emb_a = bytes_to_vector(ko_a.embedding) if ko_a.embedding else []
                 emb_b = bytes_to_vector(ko_b.embedding) if ko_b.embedding else []
-
-                if not emb_a or not emb_b:
-                    continue
 
                 # Get actors
                 actors_a = {p.get("email", "") for p in (ko_a.participants or []) if p.get("email")}
