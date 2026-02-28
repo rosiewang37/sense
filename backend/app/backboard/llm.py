@@ -12,13 +12,13 @@ settings = get_settings()
 BACKBOARD_BASE = settings.backboard_api_url
 BACKBOARD_KEY = settings.backboard_api_key
 
-# Model mapping
+# Model mapping — uses models available on the Backboard instance
 MODELS = {
-    "detection": {"provider": "google", "model": "gemini-2.0-flash"},
-    "extraction": {"provider": "google", "model": "gemini-2.0-flash"},
-    "verification": {"provider": "google", "model": "gemini-2.0-flash"},
-    "chat": {"provider": "google", "model": "gemini-2.5-pro"},
-    "embedding": {"provider": "google", "model": "text-embedding-004"},
+    "detection": {"provider": "anthropic", "model": "claude-3-haiku-20240307"},
+    "extraction": {"provider": "anthropic", "model": "claude-3-haiku-20240307"},
+    "verification": {"provider": "anthropic", "model": "claude-haiku-4-5-20251001"},
+    "chat": {"provider": "anthropic", "model": "claude-sonnet-4-20250514"},
+    "embedding": {"provider": "cohere", "model": "embed-english-v3.0"},
 }
 
 
@@ -106,35 +106,12 @@ class BackboardLLMClient:
     async def embed(self, text: str) -> list[float]:
         """Generate an embedding vector for the given text.
 
-        Returns a 768-dimensional vector.
+        Backboard API does not expose a standalone embedding endpoint — embeddings
+        are used internally for RAG/memory. This method returns an empty list to
+        signal that embedding generation is unavailable. The calling code in
+        embeddings.py already handles this gracefully (returns None).
         """
-        model_config = MODELS["embedding"]
-        assistant_id = await self._get_or_create_assistant("embedding")
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            thread_resp = await client.post(
-                f"{BACKBOARD_BASE}/assistants/{assistant_id}/threads",
-                headers=self._headers(),
-                json={},
-            )
-            thread_resp.raise_for_status()
-            thread_id = thread_resp.json()["thread_id"]
-
-            msg_resp = await client.post(
-                f"{BACKBOARD_BASE}/threads/{thread_id}/messages",
-                headers=self._headers(),
-                data={
-                    "content": text,
-                    "llm_provider": model_config["provider"],
-                    "model_name": model_config["model"],
-                    "stream": "false",
-                    "send_to_llm": "true",
-                },
-            )
-            msg_resp.raise_for_status()
-            result = msg_resp.json()
-            # The embedding should be returned in the response
-            return result.get("embedding", [0.0] * 768)
+        return []
 
     async def _get_or_create_assistant(
         self, role: str, system: str | None = None, tools: list[dict] | None = None
@@ -152,9 +129,9 @@ class BackboardLLMClient:
         if tools:
             payload["tools"] = tools
         if role == "embedding":
-            payload["embedding_provider"] = "google"
-            payload["embedding_model_name"] = "text-embedding-004"
-            payload["embedding_dims"] = 768
+            payload["embedding_provider"] = "cohere"
+            payload["embedding_model_name"] = "embed-english-v3.0"
+            payload["embedding_dims"] = 1024
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
