@@ -36,6 +36,7 @@ def parse_slack_event(payload: dict) -> dict:
         # message, message_changed, file_shared, etc.
         source_id = event.get("ts", "")
         content = event.get("text", "")
+        files = event.get("files") or []
         try:
             ts_float = float(event.get("ts", 0))
             occurred_at = datetime.fromtimestamp(ts_float, tz=timezone.utc).isoformat()
@@ -44,6 +45,7 @@ def parse_slack_event(payload: dict) -> dict:
         metadata = {
             "channel": event.get("channel"),
             "thread_ts": event.get("thread_ts"),
+            "file_ids": [str(file_data.get("id") or "") for file_data in files if file_data.get("id")],
         }
 
     return {

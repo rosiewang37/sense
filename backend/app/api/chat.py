@@ -73,6 +73,11 @@ async def chat_query(
             answer = result.get("answer", "")
             yield json.dumps({"type": "text", "content": answer}) + "\n"
 
+            # Stream sources (if any) — frontend renders these behind a toggle
+            sources = result.get("sources")
+            if sources:
+                yield json.dumps({"type": "sources", "sources": sources}) + "\n"
+
             # Save assistant response to DB
             agent_msg = ChatMessage(
                 user_id=str(current_user.id),

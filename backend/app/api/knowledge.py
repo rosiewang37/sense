@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import get_current_user
 from app.database import get_db
-from app.backboard.models import KnowledgeObject, VerificationCheck
+from app.backboard.models import Event, KnowledgeEvent, KnowledgeObject, VerificationCheck
 from app.models.user import User
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
@@ -25,6 +25,7 @@ class KnowledgeResponse(BaseModel):
     detected_at: str | None
     occurred_at: str | None
     verification_summary: dict | None = None
+    source_events: list | None = None
 
 
 class KnowledgeUpdateRequest(BaseModel):
@@ -113,6 +114,29 @@ async def get_knowledge(
     )
     checks = v_result.scalars().all()
 
+    linked_event_result = await db.execute(
+        select(Event, KnowledgeEvent)
+        .join(KnowledgeEvent, KnowledgeEvent.event_id == Event.id)
+        .where(KnowledgeEvent.knowledge_id == ko_id)
+        .order_by(Event.occurred_at.asc())
+    )
+    source_events = []
+    for event, link in linked_event_result.all():
+        source_events.append(
+            {
+                "id": str(event.id),
+                "source": event.source,
+                "source_id": event.source_id,
+                "event_type": event.event_type,
+                "actor_name": event.actor_name,
+                "content": event.content,
+                "occurred_at": event.occurred_at,
+                "relationship": link.relationship_,
+                "relevance": link.relevance,
+                "metadata": event.metadata_ or {},
+            }
+        )
+
     return {
         "id": str(ko.id),
         "type": ko.type,
@@ -125,6 +149,7 @@ async def get_knowledge(
         "status": ko.status,
         "detected_at": ko.detected_at,
         "occurred_at": ko.occurred_at,
+        "source_events": source_events,
         "verification_checks": [
             {
                 "id": str(c.id),

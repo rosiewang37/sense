@@ -1,5 +1,6 @@
 import { useParams, Link } from 'react-router-dom';
 import { useKnowledgeDetail } from '../hooks/useKnowledge';
+import ContextPanel from '../components/knowledge/ContextPanel';
 import VerificationPanel from '../components/knowledge/VerificationPanel';
 
 export default function KnowledgeDetailPage() {
@@ -78,6 +79,8 @@ export default function KnowledgeDetailPage() {
               </div>
             )}
           </div>
+
+          <ContextPanel sourceEvents={ko.source_events || []} />
 
           {/* Verification Panel */}
           <div className="bg-white rounded-lg shadow p-6">

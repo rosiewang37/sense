@@ -303,7 +303,8 @@ async def _fallback_db_search(
     """Fallback: search the DB directly without LLM reasoning.
 
     Returns whatever KOs match the query so the user gets some data
-    even when the LLM gateway is down.
+    even when the LLM gateway is down. Produces a personable answer
+    with detailed sources sent separately via the ``sources`` key.
     """
     logger.info(f"Running fallback DB search (reason: {error_type})")
     try:
@@ -315,24 +316,50 @@ async def _fallback_db_search(
 
         steps.append({"tool": "fallback_search", "args": {"query": question}, "result": {"kos": len(ko_data), "events": len(event_data)}})
 
-        # Build a simple text answer from the raw results
-        parts = []
+        # Build a personable answer (visible text)
         if ko_data:
-            parts.append("**Knowledge Objects found:**")
-            for ko in ko_data:
-                parts.append(f"- [{ko.get('type', 'unknown')}] {ko.get('title', 'Untitled')} — {ko.get('summary', 'No summary')}")
-        if event_data:
-            parts.append("\n**Related Events:**")
-            for ev in event_data:
-                parts.append(f"- [{ev.get('source', '')}] {(ev.get('content', '') or '')[:200]}")
-        if not parts:
-            parts.append("No relevant knowledge objects or events found for your query.")
+            # Summarize the top results conversationally
+            ko_summaries = []
+            for ko in ko_data[:3]:
+                ko_type = ko.get("type", "item")
+                title = ko.get("title", "Untitled")
+                summary = ko.get("summary", "")
+                if summary:
+                    ko_summaries.append(f"**{title}** — {summary}")
+                else:
+                    ko_summaries.append(f"**{title}** ({ko_type})")
 
-        parts.append(f"\n\n*Note: LLM reasoning was unavailable ({error_type}). Showing raw search results.*")
-        answer = "\n".join(parts)
+            if len(ko_data) == 1:
+                answer = f"I found one relevant {ko_data[0].get('type', 'item')} in the knowledge base:\n\n" + ko_summaries[0]
+            else:
+                answer = f"I found {len(ko_data)} relevant items in the knowledge base:\n\n" + "\n\n".join(ko_summaries)
+                if len(ko_data) > 3:
+                    answer += f"\n\n...and {len(ko_data) - 3} more. Check the sources below for details."
+        elif event_data:
+            answer = "I didn't find any structured decisions matching your query, but I found some related raw events that might help. See the sources below."
+        else:
+            answer = "I wasn't able to find anything matching your query in the knowledge base or raw events. Try rephrasing or check back after more data has been ingested."
+
+        # Build sources list (hidden behind toggle on frontend)
+        sources = []
+        for ko in ko_data:
+            sources.append({
+                "type": "knowledge_object",
+                "id": ko.get("id", ""),
+                "label": f"[{ko.get('type', 'unknown')}] {ko.get('title', 'Untitled')}",
+                "detail": ko.get("summary", ""),
+            })
+        for ev in event_data:
+            sources.append({
+                "type": "event",
+                "id": ev.get("id", ""),
+                "label": f"[{ev.get('source', 'unknown')}] {ev.get('actor_name') or 'Unknown'}",
+                "detail": (ev.get("content") or "")[:300],
+            })
 
     except Exception as fallback_err:
         logger.error(f"Fallback DB search also failed: {fallback_err}", exc_info=True)
-        answer = f"The AI assistant is temporarily unavailable ({error_type}), and the database fallback also encountered an error. Please try again later."
+        answer = "The AI assistant is temporarily unavailable. Please try again in a moment."
+        sources = []
 
-    return {"answer": answer, "steps": steps, "thread_id": thread_id}
+    return {"answer": answer, "steps": steps, "thread_id": thread_id, "sources": sources}

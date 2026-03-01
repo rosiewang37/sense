@@ -1,5 +1,6 @@
 """FastAPI application entry point."""
 import logging
+import sys
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
@@ -16,6 +17,19 @@ from app.api.knowledge import router as knowledge_router
 from app.api.chat import router as chat_router
 from app.api.integrations import router as integrations_router
 
+# ---- Logging setup ----
+# Without this, all logger.info() calls in the pipeline are silently discarded
+# because Python defaults to WARNING level.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    stream=sys.stdout,
+)
+# Quiet down noisy libraries
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
@@ -29,7 +43,7 @@ async def lifespan(app: FastAPI):
         from app.sense.tasks import run_correlation_async
 
         scheduler = AsyncIOScheduler()
-        scheduler.add_job(run_correlation_async, "interval", seconds=120, id="correlation-scan")
+        scheduler.add_job(run_correlation_async, "interval", seconds=10, id="correlation-scan")
         scheduler.start()
         logger.info("APScheduler started: correlation scan every 2 minutes")
     except Exception as e:
@@ -78,3 +92,59 @@ async def health_db(db: AsyncSession = Depends(get_db)):
     result = await db.execute(text("SELECT 1"))
     result.scalar()
     return {"status": "ok", "database": "connected"}
+
+
+@app.get("/api/debug/pipeline")
+async def debug_pipeline(db: AsyncSession = Depends(get_db)):
+    """Diagnostic endpoint: shows recent events and KOs to verify the pipeline is working.
+
+    Hit this in your browser at http://localhost:8000/api/debug/pipeline
+    """
+    from sqlalchemy import select, func
+    from app.backboard.models import Event, KnowledgeObject
+
+    # Recent events (last 10)
+    ev_result = await db.execute(
+        select(Event).order_by(Event.ingested_at.desc()).limit(10)
+    )
+    recent_events = [
+        {
+            "id": str(e.id),
+            "source": e.source,
+            "content_preview": (e.content or "")[:100],
+            "actor_name": e.actor_name,
+            "ingested_at": e.ingested_at,
+            "has_embedding": e.embedding is not None,
+            "has_context": bool((e.metadata_ or {}).get("context_messages")),
+        }
+        for e in ev_result.scalars().all()
+    ]
+
+    # Recent KOs (last 10)
+    ko_result = await db.execute(
+        select(KnowledgeObject).order_by(KnowledgeObject.detected_at.desc()).limit(10)
+    )
+    recent_kos = [
+        {
+            "id": str(ko.id),
+            "type": ko.type,
+            "title": ko.title,
+            "status": ko.status,
+            "confidence": ko.confidence,
+            "detected_at": ko.detected_at,
+        }
+        for ko in ko_result.scalars().all()
+    ]
+
+    # Counts
+    ev_count = (await db.execute(select(func.count(Event.id)))).scalar()
+    ko_count = (await db.execute(select(func.count(KnowledgeObject.id)))).scalar()
+
+    return {
+        "summary": {
+            "total_events": ev_count,
+            "total_kos": ko_count,
+        },
+        "recent_events": recent_events,
+        "recent_kos": recent_kos,
+    }

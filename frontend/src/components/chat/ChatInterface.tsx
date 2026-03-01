@@ -79,6 +79,33 @@ export default function ChatInterface({ chatState, setChatState }: Props) {
                   </span>
                 ) : null)}
               </div>
+              {/* Sources — collapsible context section */}
+              {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && (
+                <details className="mt-3 pt-3 border-t border-gray-100">
+                  <summary className="text-xs font-medium text-gray-500 cursor-pointer hover:text-gray-700 select-none">
+                    View sources ({msg.sources.length})
+                  </summary>
+                  <div className="mt-2 space-y-2">
+                    {msg.sources.map((src, j) => (
+                      <div key={j} className="rounded-md bg-gray-50 border border-gray-100 p-2 text-xs">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className={`px-1.5 py-0.5 rounded-full font-medium ${
+                            src.type === 'knowledge_object'
+                              ? 'bg-blue-100 text-blue-700'
+                              : 'bg-gray-200 text-gray-600'
+                          }`}>
+                            {src.type === 'knowledge_object' ? 'KO' : 'Event'}
+                          </span>
+                          <span className="font-medium text-gray-700">{src.label}</span>
+                        </div>
+                        {src.detail && (
+                          <p className="text-gray-500 mt-1">{src.detail}</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
             </div>
           </div>
         ))}

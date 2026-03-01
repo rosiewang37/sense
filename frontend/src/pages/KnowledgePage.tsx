@@ -36,7 +36,11 @@ export default function KnowledgePage() {
 
           <div className="space-y-3">
             {data?.items?.map((ko) => (
-              <KnowledgeCard key={ko.id} ko={ko} />
+              <KnowledgeCard
+                key={ko.id}
+                ko={ko}
+                onClick={() => navigate(`/knowledge/${ko.id}`)}
+              />
             ))}
             {data?.items?.length === 0 && !isLoading && (
               <p className="text-gray-400 text-center py-8">

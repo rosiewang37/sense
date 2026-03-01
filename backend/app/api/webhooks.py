@@ -41,8 +41,13 @@ async def slack_webhook(request: Request, background_tasks: BackgroundTasks):
 
     # Parse event and dispatch to background processing
     event_data = parse_slack_event(payload)
+    content_preview = (event_data.get("content") or "")[:80]
+    logger.info(
+        f"[webhook] Slack event parsed: type={event_data.get('event_type')}, "
+        f"actor={event_data.get('actor_name')}, content=\"{content_preview}\""
+    )
     background_tasks.add_task(process_event_async, event_data)
-    logger.info(f"Dispatched Slack event {event_data.get('source_id')} to background")
+    logger.info(f"[webhook] Dispatched to background pipeline")
 
     return {"ok": True}
 

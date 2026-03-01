@@ -59,15 +59,9 @@ class BackboardLLMClient:
         )
 
         # Create a new thread for this conversation
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            thread_resp = await client.post(
-                f"{BACKBOARD_BASE}/assistants/{assistant_id}/threads",
-                headers=self._headers(),
-                json={},
-            )
-            thread_resp.raise_for_status()
-            thread_id = thread_resp.json()["thread_id"]
+        thread_id = await self.create_thread(assistant_id)
 
+        async with httpx.AsyncClient(timeout=60.0) as client:
             # Send the last user message
             user_msg = messages[-1]["content"] if messages else ""
             msg_resp = await client.post(
@@ -94,12 +88,20 @@ class BackboardLLMClient:
     async def create_thread(self, assistant_id: str) -> str:
         """Create a new persistent Backboard thread. Returns thread_id."""
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{BACKBOARD_BASE}/assistants/{assistant_id}/threads",
-                headers=self._headers(),
-                json={},
-            )
-            resp.raise_for_status()
+            try:
+                resp = await client.post(
+                    f"{BACKBOARD_BASE}/assistants/{assistant_id}/threads",
+                    headers=self._headers(),
+                    json={},
+                )
+                resp.raise_for_status()
+            except httpx.HTTPError:
+                logger.error(
+                    "create_thread failed for assistant %s",
+                    assistant_id,
+                    exc_info=True,
+                )
+                raise
             data = resp.json()
             if "thread_id" not in data:
                 logger.error(f"create_thread: response missing 'thread_id': {data}")
@@ -132,16 +134,9 @@ class BackboardLLMClient:
         """
         model_config = MODELS["embedding"]
         assistant_id = await self._get_or_create_assistant("embedding")
+        thread_id = await self.create_thread(assistant_id)
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            thread_resp = await client.post(
-                f"{BACKBOARD_BASE}/assistants/{assistant_id}/threads",
-                headers=self._headers(),
-                json={},
-            )
-            thread_resp.raise_for_status()
-            thread_id = thread_resp.json()["thread_id"]
-
             msg_resp = await client.post(
                 f"{BACKBOARD_BASE}/threads/{thread_id}/messages",
                 headers=self._headers(),
@@ -178,12 +173,20 @@ class BackboardLLMClient:
             payload["embedding_dims"] = 768
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{BACKBOARD_BASE}/assistants",
-                headers=self._headers(),
-                json=payload,
-            )
-            resp.raise_for_status()
+            try:
+                resp = await client.post(
+                    f"{BACKBOARD_BASE}/assistants",
+                    headers=self._headers(),
+                    json=payload,
+                )
+                resp.raise_for_status()
+            except httpx.HTTPError:
+                logger.error(
+                    "_get_or_create_assistant failed for role %s",
+                    role,
+                    exc_info=True,
+                )
+                raise
             data = resp.json()
             if "assistant_id" not in data:
                 logger.error(f"_get_or_create_assistant({role}): response missing 'assistant_id': {data}")

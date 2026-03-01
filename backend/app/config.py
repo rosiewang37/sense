@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     github_private_key: str = ""
     github_webhook_secret: str = ""
 
+    # Testing — set to true to skip verification agent for faster pipeline.
+    # TODO: Remove this flag once testing is complete; verification should always run in production.
+    skip_verification: bool = False
+
     # Encryption
     encryption_key: str = ""
 

@@ -29,29 +29,48 @@ async def process_event_async(event_data: dict) -> dict:
     from app.backboard.embeddings import generate_embedding
     from app.backboard.models import KnowledgeEvent
 
+    source = event_data.get("source", "unknown")
+    content_preview = (event_data.get("content") or "")[:80]
+    logger.info(f"[task] ===== PROCESSING EVENT from {source}: \"{content_preview}\" =====")
+
     async with get_session_factory()() as db:
         # Step 1: Store event (dedup handled inside store_event)
         event = await store_event(db, event_data)
         event_id = str(event.id)
-        logger.info(f"Stored event {event_id} from {event_data.get('source')}")
+        logger.info(f"[task] Step 1/5 STORE: event {event_id} stored")
+
+        if event_data.get("source") == "slack":
+            logger.info(f"[task] Step 1b ENRICH: fetching Slack context...")
+            event_data = await _enrich_slack_event_context(event, event_data)
+            ctx = (event_data.get("metadata") or {}).get("context_messages")
+            logger.info(f"[task] Step 1b ENRICH: done ({len(ctx) if ctx else 0} context messages)")
 
         # Step 2: Generate embedding for the event content
         content = event_data.get("content", "")
         if content:
+            logger.info(f"[task] Step 2/5 EMBED: generating embedding...")
             embedding_bytes = await generate_embedding(content)
             if embedding_bytes:
                 event.embedding = embedding_bytes
-                logger.info(f"Generated embedding for event {event_id}")
+                logger.info(f"[task] Step 2/5 EMBED: success")
+            else:
+                logger.warning(f"[task] Step 2/5 EMBED: returned None (API issue?)")
 
         await db.commit()
 
         # Step 3: Run extraction pipeline
         from app.sense.detection import run_extraction_pipeline
 
-        ko_data = await run_extraction_pipeline(event_data)
+        logger.info(f"[task] Step 3/5 EXTRACT: running extraction pipeline...")
+        try:
+            ko_data = await run_extraction_pipeline(event_data)
+        except Exception as e:
+            logger.error(f"[task] Step 3/5 EXTRACT FAILED: {e}", exc_info=True)
+            return {"event_id": event_id, "ko_created": False, "error": str(e)}
 
         if ko_data is None:
-            logger.info(f"Event {event_id} filtered out (not significant)")
+            logger.info(f"[task] Step 3/5 EXTRACT: no KO produced (filtered or not significant)")
+            logger.info(f"[task] ===== EVENT {event_id} DONE (no KO) =====")
             return {"event_id": event_id, "ko_created": False}
 
         # Step 4: For GitHub events, try to link to an existing decision KO
@@ -67,13 +86,17 @@ async def process_event_async(event_data: dict) -> dict:
                 return {"event_id": event_id, "ko_created": False, "linked_ko_id": linked_ko_id}
 
         # Step 4b: Store as a new Knowledge Object
+        logger.info(f"[task] Step 4/5 STORE KO: \"{ko_data.get('title')}\" (type={ko_data.get('type')})")
         ko_data["occurred_at"] = event_data.get("occurred_at")
         ko_data["project_id"] = event_data.get("project_id")
-        ko_data["participants"] = _extract_participants(event_data)
+        ko_data["participants"] = _merge_participants(
+            ko_data.get("participants"),
+            _extract_participants(event_data),
+        )
 
         ko = await store_knowledge_object(db, ko_data)
         ko_id = str(ko.id)
-        logger.info(f"Created KO {ko_id}: {ko_data.get('title')}")
+        logger.info(f"[task] Step 4/5 STORE KO: created KO {ko_id}")
 
         # Generate KO embedding
         ko_text = f"{ko_data.get('title', '')} {ko_data.get('summary', '')}"
@@ -90,10 +113,21 @@ async def process_event_async(event_data: dict) -> dict:
         )
         db.add(link)
         await db.commit()
+        logger.info(f"[task] Step 4/5 STORE KO: committed to DB and linked to event {event_id}")
 
         # Step 5: Run verification inline (same background task)
-        await run_verification_async(ko_id)
+        # NOTE: Verification is skipped when SKIP_VERIFICATION=true (for testing).
+        # In production this should always run. Remove the flag once testing is done.
+        from app.config import get_settings
+        _settings = get_settings()
+        if getattr(_settings, "skip_verification", False):
+            logger.info(f"[task] Step 5/5 VERIFY: skipped (SKIP_VERIFICATION=true)")
+        else:
+            logger.info(f"[task] Step 5/5 VERIFY: running verification agent...")
+            await run_verification_async(ko_id)
+            logger.info(f"[task] Step 5/5 VERIFY: done")
 
+        logger.info(f"[task] ===== EVENT {event_id} DONE → KO {ko_id} created =====")
         return {"event_id": event_id, "ko_created": True, "ko_id": ko_id}
 
 
@@ -109,6 +143,81 @@ def _extract_participants(event_data: dict) -> list[dict]:
             "role": "author",
         })
     return participants
+
+
+def _merge_participants(*participant_groups: list[dict] | None) -> list[dict]:
+    """Merge participant lists, deduplicating by email when available, else by name."""
+    merged: dict[str, dict] = {}
+
+    for group in participant_groups:
+        for participant in group or []:
+            if not isinstance(participant, dict):
+                continue
+
+            email = (participant.get("email") or "").strip()
+            name = (participant.get("name") or "").strip()
+            if not email and not name:
+                continue
+
+            key = email.lower() if email else f"name:{name.lower()}"
+            existing = merged.get(key, {"email": "", "name": "", "role": "participant"})
+            role = "author" if "author" in {existing.get("role"), participant.get("role")} else (
+                participant.get("role") or existing.get("role") or "participant"
+            )
+            merged[key] = {
+                "email": email or existing.get("email", ""),
+                "name": name or existing.get("name", ""),
+                "role": role,
+            }
+
+    return list(merged.values())
+
+
+async def _enrich_slack_event_context(event, event_data: dict) -> dict:
+    """Best-effort Slack enrichment for surrounding messages, names, and attachments."""
+    from app.config import get_settings
+    from app.sense.integrations.slack_api import (
+        fetch_surrounding_messages,
+        get_file_metadata,
+        resolve_user_name,
+    )
+
+    settings = get_settings()
+    if not settings.slack_bot_token:
+        return event_data
+
+    metadata = dict(event.metadata_ or event_data.get("metadata") or {})
+    channel = metadata.get("channel")
+    message_ts = event_data.get("source_id")
+
+    if channel and message_ts:
+        context_messages = await fetch_surrounding_messages(
+            channel=channel,
+            message_ts=message_ts,
+            bot_token=settings.slack_bot_token,
+        )
+        if context_messages:
+            metadata["context_messages"] = context_messages
+
+    actor_id = event_data.get("actor_name") or ""
+    if actor_id:
+        actor_display_name = await resolve_user_name(actor_id, settings.slack_bot_token)
+        if actor_display_name:
+            metadata["actor_display_name"] = actor_display_name
+            event.actor_name = actor_display_name
+            event_data["actor_name"] = actor_display_name
+
+    attachments = []
+    for file_id in metadata.get("file_ids") or []:
+        file_metadata = await get_file_metadata(file_id, settings.slack_bot_token)
+        if file_metadata:
+            attachments.append(file_metadata)
+    if attachments:
+        metadata["attachments"] = attachments
+
+    event.metadata_ = metadata
+    event_data["metadata"] = metadata
+    return event_data
 
 
 async def _find_and_link_to_existing_decision(

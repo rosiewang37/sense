@@ -7,11 +7,19 @@ export interface ChatStep {
   result_preview: string;
 }
 
+export interface ChatSource {
+  type: string;
+  id: string;
+  label: string;
+  detail: string;
+}
+
 export interface ChatMessage {
   id?: string;
   role: 'user' | 'assistant';
   content: string;
   steps?: ChatStep[];
+  sources?: ChatSource[];
   created_at?: string;
 }
 
@@ -92,6 +100,7 @@ export function useChat(
 
         const decoder = new TextDecoder();
         const steps: ChatStep[] = [];
+        let sources: ChatSource[] = [];
         let answer = '';
 
         // Add assistant placeholder so UI shows "Investigating..." immediately
@@ -112,6 +121,8 @@ export function useChat(
                 steps.push(event as ChatStep);
               } else if (event.type === 'text') {
                 answer += event.content || '';
+              } else if (event.type === 'sources') {
+                sources = event.sources || [];
               }
             } catch {
               // skip malformed lines
@@ -123,7 +134,7 @@ export function useChat(
             const msgs = [...prev.messages];
             const last = msgs[msgs.length - 1];
             if (last?.role === 'assistant') {
-              msgs[msgs.length - 1] = { ...last, content: answer, steps: [...steps] };
+              msgs[msgs.length - 1] = { ...last, content: answer, steps: [...steps], sources: sources.length > 0 ? [...sources] : undefined };
             }
             return { ...prev, messages: msgs };
           });
@@ -134,7 +145,7 @@ export function useChat(
           const msgs = [...prev.messages];
           const last = msgs[msgs.length - 1];
           if (last?.role === 'assistant') {
-            msgs[msgs.length - 1] = { role: 'assistant', content: answer, steps };
+            msgs[msgs.length - 1] = { role: 'assistant', content: answer, steps, sources: sources.length > 0 ? sources : undefined };
           }
           return { messages: msgs, isLoading: false, historyLoaded: prev.historyLoaded };
         });

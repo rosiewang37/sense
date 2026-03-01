@@ -23,6 +23,9 @@ export function useKnowledgeList(filters?: {
   return useQuery({
     queryKey: ['knowledge', qs],
     queryFn: () => api.get<KnowledgeListResponse>(`/knowledge${qs ? `?${qs}` : ''}`),
+    // Auto-refresh every 5 seconds so new KOs appear quickly during testing.
+    // TODO: Increase to 30s+ in production to reduce server load.
+    refetchInterval: 5_000,
   });
 }
 

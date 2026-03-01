@@ -71,7 +71,7 @@ async def fetch_surrounding_messages(
     channel: str,
     message_ts: str,
     bot_token: str,
-    window: int = 5,
+    window: int = 3,
 ) -> list[dict]:
     """Fetch a best-effort slice of nearby channel messages around a message timestamp."""
     if not channel or not message_ts or not bot_token:

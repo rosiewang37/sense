@@ -4,7 +4,10 @@ Uses the pre-filter regex patterns from the TECHNICAL_SPEC Section 5.2,
 classification prompt from 5.3, and extraction prompt from 5.4.
 """
 import json
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 # --- Pre-filter (Rule-Based, No LLM Cost) ---
 
@@ -153,6 +156,70 @@ def parse_extraction_response(response_text: str) -> dict | None:
 
 # --- Full Pipeline ---
 
+def _format_context_for_extraction(event: dict) -> tuple[str, list[dict]]:
+    """Build a readable context block for extraction and collect named participants."""
+    metadata = event.get("metadata") or {}
+    context_messages = metadata.get("context_messages") or []
+    attachments = metadata.get("attachments") or []
+    trigger_ts = str(event.get("source_id") or "")
+    trigger_index = next(
+        (idx for idx, msg in enumerate(context_messages) if str(msg.get("ts") or "") == trigger_ts),
+        None,
+    )
+
+    lines: list[str] = []
+    participants: list[dict] = []
+    seen_participants: set[str] = set()
+
+    def add_participant(name: str) -> None:
+        cleaned = (name or "").strip()
+        if not cleaned:
+            return
+        key = cleaned.lower()
+        if key in seen_participants:
+            return
+        seen_participants.add(key)
+        participants.append({"email": "", "name": cleaned, "role": "participant"})
+
+    def format_message(message: dict) -> str:
+        name = (message.get("user_name") or "Unknown").strip() or "Unknown"
+        text = (message.get("text") or "").strip()
+        add_participant(name)
+        return f"- {name}: {text}"
+
+    if context_messages:
+        if trigger_index is None:
+            trigger_index = max(0, len(context_messages) - 1)
+
+        preceding = context_messages[:trigger_index]
+        trigger_message = context_messages[trigger_index]
+        following = context_messages[trigger_index + 1:]
+
+        if preceding:
+            lines.append("Preceding messages:")
+            lines.extend(format_message(message) for message in preceding if message.get("text"))
+
+        lines.append("Trigger message:")
+        lines.append(format_message(trigger_message))
+
+        if following:
+            lines.append("Following messages:")
+            lines.extend(format_message(message) for message in following if message.get("text"))
+
+    if attachments:
+        lines.append("Shared attachments:")
+        for attachment in attachments:
+            name = attachment.get("name", "unnamed file") or "unnamed file"
+            filetype = attachment.get("filetype") or attachment.get("mimetype") or "unknown"
+            permalink = attachment.get("permalink") or attachment.get("url_private") or ""
+            suffix = f" ({filetype})"
+            if permalink:
+                suffix += f" {permalink}"
+            lines.append(f"- {name}{suffix}")
+
+    return "\n".join(lines).strip(), participants
+
+
 async def run_extraction_pipeline(
     event: dict,
     mock_classify_response: str | None = None,
@@ -164,22 +231,27 @@ async def run_extraction_pipeline(
     Returns extracted KO data dict or None if filtered/not significant.
     """
     content = event.get("content", "")
+    source = event.get("source", "unknown")
+    preview = (content or "")[:80]
 
     # Step 1: Pre-filter
     if not pre_filter(content):
+        logger.info(f"[pipeline] PRE-FILTER rejected ({source}): \"{preview}\"")
         return None
+    logger.info(f"[pipeline] PRE-FILTER passed ({source}): \"{preview}\"")
 
     # Step 2: Classification
     if mock_classify_response:
         classify_text = mock_classify_response
     else:
         # Production path: call LLM via Backboard API
+        logger.info(f"[pipeline] CLASSIFY: calling LLM for classification...")
         from app.backboard.llm import backboard_llm
         classify_result = await backboard_llm.chat(
             messages=[{
                 "role": "user",
                 "content": CLASSIFICATION_PROMPT.format(
-                    source=event.get("source", "unknown"),
+                    source=source,
                     event_type=event.get("event_type", "unknown"),
                     actor_name=event.get("actor_name", "unknown"),
                     content=content,
@@ -188,34 +260,53 @@ async def run_extraction_pipeline(
             model_role="detection",
         )
         classify_text = classify_result["content"]
+        logger.info(f"[pipeline] CLASSIFY: LLM responded")
 
     classification = parse_classification_response(classify_text)
+    logger.info(
+        f"[pipeline] CLASSIFY result: significant={classification['is_significant']}, "
+        f"confidence={classification['confidence']:.2f}, type={classification['type']}"
+    )
 
     if not classification["is_significant"] or classification["confidence"] < 0.5:
+        logger.info(f"[pipeline] CLASSIFY rejected (not significant or low confidence)")
         return None
+
+    context_text, context_participants = _format_context_for_extraction(event)
+    if context_text:
+        logger.info(f"[pipeline] CONTEXT: {len(context_participants)} participants, {len(context_text)} chars of context")
 
     # Step 3: Extraction
     if mock_extract_response:
         extract_text = mock_extract_response
     else:
+        logger.info(f"[pipeline] EXTRACT: calling LLM for extraction...")
         from app.backboard.llm import backboard_llm
         extract_result = await backboard_llm.chat(
             messages=[{
                 "role": "user",
                 "content": EXTRACTION_PROMPT.format(
-                    source=event.get("source", "unknown"),
+                    source=source,
                     content=content,
-                    context="",
+                    context=context_text,
                 ),
             }],
             model_role="extraction",
         )
         extract_text = extract_result["content"]
+        logger.info(f"[pipeline] EXTRACT: LLM responded")
 
     extraction = parse_extraction_response(extract_text)
     if extraction is None:
+        logger.warning(f"[pipeline] EXTRACT: failed to parse extraction response")
         return None
+
+    logger.info(
+        f"[pipeline] EXTRACT success: title=\"{extraction.get('title', '')}\", "
+        f"type={extraction.get('type', '')}"
+    )
 
     # Add classification confidence
     extraction["confidence"] = classification["confidence"]
+    extraction["participants"] = context_participants
     return extraction
