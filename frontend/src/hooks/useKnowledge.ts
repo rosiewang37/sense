@@ -34,5 +34,8 @@ export function useKnowledgeDetail(id: string) {
     queryKey: ['knowledge', id],
     queryFn: () => api.get<KnowledgeObject>(`/knowledge/${id}`),
     enabled: !!id,
+    // Auto-refresh so context updates (follow-up messages, GitHub evidence)
+    // appear without manual reload. Same interval as the list page.
+    refetchInterval: 5_000,
   });
 }

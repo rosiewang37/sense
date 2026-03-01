@@ -43,7 +43,7 @@ async def lifespan(app: FastAPI):
         from app.sense.tasks import run_correlation_async
 
         scheduler = AsyncIOScheduler()
-        scheduler.add_job(run_correlation_async, "interval", seconds=10, id="correlation-scan")
+        scheduler.add_job(run_correlation_async, "interval", seconds=120, id="correlation-scan")
         scheduler.start()
         logger.info("APScheduler started: correlation scan every 2 minutes")
     except Exception as e:

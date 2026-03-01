@@ -44,6 +44,9 @@ async def process_event_async(event_data: dict) -> dict:
             event_data = await _enrich_slack_event_context(event, event_data)
             ctx = (event_data.get("metadata") or {}).get("context_messages")
             logger.info(f"[task] Step 1b ENRICH: done ({len(ctx) if ctx else 0} context messages)")
+            # Ensure SQLAlchemy detects the JSON column change
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(event, "metadata_")
 
         # Step 2: Generate embedding for the event content
         content = event_data.get("content", "")
@@ -70,11 +73,32 @@ async def process_event_async(event_data: dict) -> dict:
 
         if ko_data is None:
             logger.info(f"[task] Step 3/5 EXTRACT: no KO produced (filtered or not significant)")
+
+            # Even without a new KO, try to link this event to an existing one.
+            # GitHub events → link as evidence; Slack events → link as context
+            # and re-enrich the source event with updated surrounding messages.
+            if source == "github":
+                linked_ko_id = await _find_and_link_to_existing_decision(
+                    db, event_id, event_data
+                )
+                if linked_ko_id:
+                    logger.info(
+                        f"[task] GitHub event {event_id} linked as evidence to KO {linked_ko_id}"
+                    )
+                    return {"event_id": event_id, "ko_created": False, "linked_ko_id": linked_ko_id}
+            elif source == "slack":
+                linked_ko_id = await _try_update_related_ko(db, event_id, event_data)
+                if linked_ko_id:
+                    logger.info(
+                        f"[task] ===== EVENT {event_id} DONE (linked as context to KO {linked_ko_id}) ====="
+                    )
+                    return {"event_id": event_id, "ko_created": False, "linked_ko_id": linked_ko_id}
+
             logger.info(f"[task] ===== EVENT {event_id} DONE (no KO) =====")
             return {"event_id": event_id, "ko_created": False}
 
-        # Step 4: For GitHub events, try to link to an existing decision KO
-        # instead of creating a separate standalone KO.
+        # Step 4: For GitHub events that DID produce a KO, check if it should
+        # link to an existing decision KO instead of creating a duplicate.
         if event_data.get("source") == "github":
             linked_ko_id = await _find_and_link_to_existing_decision(
                 db, event_id, event_data
@@ -218,6 +242,115 @@ async def _enrich_slack_event_context(event, event_data: dict) -> dict:
     event.metadata_ = metadata
     event_data["metadata"] = metadata
     return event_data
+
+
+async def _try_update_related_ko(db, event_id: str, event_data: dict) -> str | None:
+    """Link a non-decision Slack event to a recent KO from the same channel.
+
+    When a Slack message that doesn't produce its own KO arrives in the same
+    channel as a recent decision, this function:
+    1. Links the new event to the existing KO as a 'context' relationship
+    2. Re-fetches surrounding messages for the KO's source event (capturing
+       follow-ups that weren't available during initial processing)
+    3. Merges new participant names into the KO
+    """
+    if event_data.get("source") != "slack":
+        return None
+
+    channel = (event_data.get("metadata") or {}).get("channel")
+    if not channel:
+        return None
+
+    from sqlalchemy import select
+    from sqlalchemy.orm.attributes import flag_modified
+    from app.backboard.models import Event as EventModel, KnowledgeEvent, KnowledgeObject
+
+    since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+
+    # Find the most recent active KO whose source event is from the same channel
+    result = await db.execute(
+        select(KnowledgeObject, EventModel)
+        .join(KnowledgeEvent, KnowledgeEvent.knowledge_id == KnowledgeObject.id)
+        .join(EventModel, KnowledgeEvent.event_id == EventModel.id)
+        .where(
+            KnowledgeObject.status == "active",
+            KnowledgeObject.detected_at >= since,
+            EventModel.source == "slack",
+            KnowledgeEvent.relationship_ == "source_event",
+        )
+        .order_by(KnowledgeObject.detected_at.desc())
+    )
+
+    matched_ko = None
+    source_event = None
+    for ko, evt in result.all():
+        evt_channel = (evt.metadata_ or {}).get("channel")
+        if evt_channel == channel:
+            matched_ko = ko
+            source_event = evt
+            break
+
+    if not matched_ko or not source_event:
+        return None
+
+    ko_id = str(matched_ko.id)
+
+    # 1. Link this event to the KO as context (skip if already linked)
+    existing_link = await db.execute(
+        select(KnowledgeEvent).where(
+            KnowledgeEvent.knowledge_id == ko_id,
+            KnowledgeEvent.event_id == event_id,
+        )
+    )
+    if not existing_link.scalar_one_or_none():
+        link = KnowledgeEvent(
+            knowledge_id=ko_id,
+            event_id=event_id,
+            relevance=0.5,
+            relationship_="context",
+        )
+        db.add(link)
+
+    # 2. Re-enrich the source event's surrounding messages so the
+    #    ContextPanel picks up follow-up messages that arrived after
+    #    the decision was first processed.
+    from app.config import get_settings
+    from app.sense.integrations.slack_api import fetch_surrounding_messages
+
+    settings = get_settings()
+    if settings.slack_bot_token:
+        source_ts = source_event.source_id
+        if source_ts:
+            context_messages = await fetch_surrounding_messages(
+                channel=channel,
+                message_ts=source_ts,
+                bot_token=settings.slack_bot_token,
+            )
+            if context_messages:
+                updated_metadata = dict(source_event.metadata_ or {})
+                updated_metadata["context_messages"] = context_messages
+                source_event.metadata_ = updated_metadata
+                flag_modified(source_event, "metadata_")
+
+    # 3. Update KO participants with the new actor name
+    actor_name = event_data.get("actor_name", "")
+    if actor_name:
+        current_participants = list(matched_ko.participants or [])
+        existing_names = {(p.get("name") or "").lower() for p in current_participants}
+        if actor_name.lower() not in existing_names:
+            current_participants.append({
+                "email": "",
+                "name": actor_name,
+                "role": "participant",
+            })
+            matched_ko.participants = current_participants
+            flag_modified(matched_ko, "participants")
+
+    await db.commit()
+    logger.info(
+        f"[task] Linked event {event_id} as context to KO {ko_id} and re-enriched source event"
+    )
+    return ko_id
 
 
 async def _find_and_link_to_existing_decision(

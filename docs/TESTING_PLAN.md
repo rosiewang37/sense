@@ -1,261 +1,440 @@
 # Manual Testing Plan
 
-This plan is meant to validate the chat fix, Slack decision extraction, surrounding-context enrichment, and GitHub correlation behavior.
+Step-by-step guide. Every message is ready to copy-paste into Slack.
 
 ## Prerequisites
 
-- Backend is running with a valid `BACKBOARD_API_KEY`.
-- Slack webhook is reachable by Slack.
-- `SLACK_BOT_TOKEN` is set if you want surrounding-message and attachment enrichment.
-- A test Slack channel exists where you can send controlled messages.
-- A test GitHub repo is connected to the GitHub webhook.
+- Backend running with a valid `BACKBOARD_API_KEY`
+- Slack webhook reachable
+- `SLACK_BOT_TOKEN` set in `.env`
+- A test Slack channel (e.g. `#sense-testing`)
+- A test GitHub repo connected to the webhook
 
-## Slack Decision Tests
+---
 
-### Test 1: Simple Decision Extraction
+## Test 1: Simple Decision Extraction
 
-Pick any one of these exact Slack messages:
+**Goal:** Confirm a single decision message creates a KO.
 
-```text
-We've decided to move frontend deployment from Vercel to Cloudflare Pages.
-Final decision: we'll standardize on Auth0 for SSO instead of maintaining custom OAuth.
-We've decided to switch CI from GitHub-hosted runners to self-hosted runners for build speed.
-Let's go with Sentry for frontend error tracking instead of relying on console logs.
-We've decided to move the API worker queue from Celery to Redis Streams.
+**Steps:**
+
+1. Go to your test Slack channel.
+2. Send **one** of these messages (pick any):
+
+```
+We've decided to migrate our primary database from MySQL to CockroachDB for horizontal scaling.
 ```
 
-Expected result:
+```
+Final decision: we're replacing NGINX with Caddy as our reverse proxy for automatic TLS.
+```
 
-- The regex pre-filter matches.
-- The classifier marks the event as significant.
+```
+We've decided to drop Elasticsearch and move all full-text search to Typesense.
+```
+
+```
+Let's go with Turborepo for our monorepo build system instead of Nx.
+```
+
+3. Wait ~10 seconds for the backend to process.
+4. Open the Knowledge page in the UI.
+
+**Expected:**
+
+- A new decision KO appears with a title matching your topic.
+- Clicking it shows the detail page with a summary and statement.
+
+**Remember which message you sent** — you'll use the same topic for Test 5.
+
+---
+
+## Test 2: Multi-Message Context (Dynamic Update)
+
+**Goal:** Confirm that follow-up messages dynamically update the decision's context after the KO is already created.
+
+**Important:** Use a **different topic** from Test 1 so the two decisions stay separate.
+
+Pick **one** option below. Send each line as a **separate Slack message**, in order, waiting 2-3 seconds between each.
+
+### Option A — Logging Stack
+
+Message 1:
+```
+Our ELK stack is eating 40% of the infra budget and nobody looks at half the dashboards.
+```
+
+Message 2:
+```
+Grafana Loki with S3 storage would cut that cost by 80% and still give us structured log queries.
+```
+
+Message 3 (the decision):
+```
+Final decision: we're replacing the ELK stack with Grafana Loki for all application logging.
+```
+
+Message 4 (follow-up):
+```
+I'll start the migration with the payments service logs this sprint.
+```
+
+### Option B — Container Runtime
+
+Message 1:
+```
+Docker Desktop licensing is getting expensive now that we have 60 engineers.
+```
+
+Message 2:
+```
+Podman is drop-in compatible and doesn't need a daemon or a paid license.
+```
+
+Message 3 (the decision):
+```
+We've decided to standardize on Podman instead of Docker Desktop for local development.
+```
+
+Message 4 (follow-up):
+```
+I'll update the onboarding docs and dev setup scripts by end of week.
+```
+
+### Option C — Feature Flags
+
+Message 1:
+```
+LaunchDarkly's pricing tier jump is brutal for our current usage.
+```
+
+Message 2:
+```
+Unleash is open-source, self-hosted, and covers every flag pattern we use today.
+```
+
+Message 3 (the decision):
+```
+We've decided to switch our feature flag system from LaunchDarkly to self-hosted Unleash.
+```
+
+Message 4 (follow-up):
+```
+I'll set up the Unleash instance on our k8s cluster and migrate the first 10 flags this week.
+```
+
+**Steps:**
+
+1. Send messages 1-4 in order (separate messages, 2-3 sec apart).
+2. After message 3 is sent, wait ~10 seconds. Check the Knowledge page — a new KO should appear.
+3. After message 4 is sent, wait ~10 seconds.
+4. Click into the KO detail page and click **Show Context**.
+
+**Expected after message 3:**
+
 - A decision KO is created.
-- The KO title and summary mention the selected topic.
+- The context panel shows messages 1 and 2 as preceding context.
+- Message 3 is highlighted in blue as the trigger.
 
-### Test 2: Multi-Message Context Around a Decision
+**Expected after message 4:**
 
-Use one of these short Slack discussions and send the messages in order from different users.
+- The context panel auto-refreshes (within 5 seconds).
+- Message 4 now appears as a following message in the surrounding context.
+- The KO's participants list includes the person who sent message 4.
+- Backend logs show: `Linked event ... as context to KO ... and re-enriched source event`
 
-```text
-Option A
-Maya: Vercel preview builds are timing out on large branches.
-Jon: Cloudflare Pages would cut deploy time and lower cost.
-Rina: We've decided to move frontend deployment to Cloudflare Pages.
-Maya: I'll update the DNS and preview environment setup tomorrow.
+---
 
-Option B
-Diego: Datadog costs are climbing and most of our alerts are noisy.
-Leah: Grafana Cloud gives us enough logs and dashboards for this stage.
-Noah: Final decision: we'll consolidate app monitoring in Grafana Cloud.
-Diego: I'll migrate the on-call dashboards this week.
+## Test 3: Attachment Metadata
 
-Option C
-Priya: Our current OAuth flow is too brittle for enterprise logins.
-Alex: Auth0 will remove a lot of edge-case maintenance.
-Sam: We've decided to standardize on Auth0 for SSO.
-Priya: I'll update the login rollout checklist tomorrow.
+**Goal:** Confirm file attachments are captured in the decision context.
+
+**Steps:**
+
+1. Create or find any small file (PDF, image, text file — doesn't matter).
+2. In your test Slack channel, upload the file and add this message:
+
+```
+We've decided to adopt the attached runbook template for all production incident responses.
 ```
 
-Expected result:
+3. Wait ~10 seconds, then open the KO detail page.
+4. Click **Show Context**.
 
-- Only the decision message should create the KO.
-- The stored event metadata should include `context_messages`.
-- The extraction prompt should receive preceding and following messages, not just the trigger line.
-- KO participants should include the named people captured from context, plus the author.
-- Open the created knowledge object from the Knowledge feed.
-- Click `Show Context` in the `Decision Context` panel.
-- Confirm the panel shows the surrounding messages and highlights the trigger message.
+**Expected:**
 
-### Test 3: Attachment Metadata Included
+- The context panel shows an **Attachments** section with the file name and type.
+- If the file was a PDF, it shows the `.pdf` filetype label.
 
-Send a Slack message with an attached file and this exact text:
+---
 
-```text
-We've decided to use the attached incident handoff checklist for the on-call rotation.
+## Test 4: Decision-Maker Name Resolution
+
+**Goal:** Confirm the decision author's display name (not Slack user ID) is shown.
+
+**Steps:**
+
+1. From your own Slack account (not a bot), send:
+
+```
+Final decision: we're moving our scheduled jobs from cron to Temporal for workflow orchestration.
 ```
 
-Use a file named:
+2. Wait ~10 seconds, then open the KO detail page.
+3. Click **Show Context**.
 
-```text
-incident-handoff-checklist.pdf
+**Expected:**
+
+- The **Author** field shows your real name (e.g. "Jane Smith"), not a Slack user ID like `U04ABCDEF`.
+- The event metadata includes `actor_display_name`.
+
+---
+
+## Test 5: GitHub Commit Links to Existing Decision
+
+**Goal:** Confirm a GitHub commit is automatically linked as evidence to a matching Slack decision.
+
+**Steps:**
+
+1. Make sure a decision KO from Test 1 already exists. Check which topic you used.
+2. In your connected GitHub repo, create a commit with a **matching** message. Pick the one that matches your Test 1 decision:
+
+If you used the MySQL/CockroachDB decision:
+```
+git commit --allow-empty -m "Migrate primary database from MySQL to CockroachDB"
 ```
 
-Expected result:
-
-- `metadata.file_ids` is captured by the Slack parser.
-- If `SLACK_BOT_TOKEN` is configured, `metadata.attachments` is populated with file metadata.
-- The extraction context includes a "Shared attachments" section.
-- In the Knowledge detail page, `Show Context` should reveal the attachment entry inside the `Decision Context` panel.
-
-### Test 4: Decision-Maker Name Resolution
-
-Send a Slack decision message from a real Slack user account:
-
-```text
-Final decision: we are moving the API worker queue to Redis Streams.
+If you used the NGINX/Caddy decision:
+```
+git commit --allow-empty -m "Replace NGINX with Caddy reverse proxy for automatic TLS"
 ```
 
-Expected result:
-
-- The stored event metadata includes `actor_display_name`.
-- The event uses the resolved human-readable name during extraction.
-- Chat search results for raw events show a real name instead of only a Slack user ID.
-
-## GitHub Correlation Tests
-
-### Test 5: GitHub Commit Links To Existing Slack Decision
-
-First create one of the Slack decisions from Test 1. Then, within 7 days, push a matching commit message such as one of these:
-
-```text
-Move frontend deployment from Vercel to Cloudflare Pages
-Adopt Auth0 for SSO and retire custom OAuth handling
-Switch API workers from Celery to Redis Streams
-Standardize frontend error tracking on Sentry
+If you used the Elasticsearch/Typesense decision:
+```
+git commit --allow-empty -m "Switch full-text search backend from Elasticsearch to Typesense"
 ```
 
-Expected result:
-
-- The GitHub event is ingested.
-- The event is compared to recent decision KOs from the last 7 days.
-- If the correlation score is at least `0.45`, the GitHub event is linked to the matching Slack decision KO as `github_evidence`.
-- No duplicate standalone KO should be created for the commit when a strong link is found.
-
-### Test 6: Unrelated GitHub Commit Does Not Link
-
-Push a commit with this exact message:
-
-```text
-Update README formatting and fix broken markdown links
+If you used the Turborepo decision:
+```
+git commit --allow-empty -m "Adopt Turborepo for monorepo build pipeline"
 ```
 
-Expected result:
+3. Push the commit: `git push`
+4. Wait ~15 seconds for the webhook to fire and the backend to process.
+5. Open the **same KO from Test 1** in the detail page. Click **Show Context**.
 
-- The event is ingested.
-- It should not link to the decision you created in Test 1.
-- It should not create a misleading decision KO.
+**Expected:**
 
-## Chat Agent Tests
+- The KO detail page now shows a second linked event with a `github_evidence` badge.
+- The GitHub commit content is visible in the context panel.
+- **No new standalone KO** was created for the commit.
+- Backend logs show: `GitHub event ... linked as evidence to KO ...`
 
-### Test 7: Known Decision Query
+---
 
-Ask the chat UI about the same topic you used in Test 1. Example prompts:
+## Test 6: Unrelated GitHub Commit Does Not Link
 
-```text
-What decisions have we made about deployment?
-What did we decide about SSO?
-What did we choose for error tracking?
-What decisions have been made about the worker queue?
+**Steps:**
+
+1. Push a commit with this message:
+
+```
+git commit --allow-empty -m "Fix typo in README and update contributing guidelines"
 ```
 
-Expected result:
+2. Push: `git push`
+3. Wait ~15 seconds.
 
-- The agent searches the knowledge base.
-- It returns a real answer that references the matching decision.
-- If Backboard is available, the answer should cite the KO or event.
-- If Backboard is unavailable, the fallback should return raw search results instead of the generic failure message.
+**Expected:**
 
-### Test 8: Narrow Follow-Up Query
+- The commit is ingested as an event.
+- It does **not** link to any existing decision KO.
+- No decision KO is created for it.
 
-After Test 7, ask:
+---
 
-```text
+## Test 7: Chat — Query a Known Decision
+
+**Steps:**
+
+1. Open the Chat page in the UI.
+2. Ask about the topic you used in Test 1. Copy one of these:
+
+If MySQL/CockroachDB:
+```
+What did we decide about our database?
+```
+
+If NGINX/Caddy:
+```
+What decisions have we made about our reverse proxy?
+```
+
+If Elasticsearch/Typesense:
+```
+Have we made any decisions about search infrastructure?
+```
+
+If Turborepo:
+```
+What did we decide about our build system?
+```
+
+**Expected:**
+
+- The agent finds and references the matching decision KO.
+- The answer includes the specific technology choice from your decision.
+
+---
+
+## Test 8: Chat — Follow-Up Query
+
+**Steps:**
+
+1. Immediately after Test 7, in the same chat session, ask:
+
+```
 Why did we make that change?
 ```
 
-Expected result:
+**Expected:**
 
-- The persistent chat thread is reused.
-- The answer uses the same underlying evidence, not an unrelated decision.
-- If no explicit rationale exists, the answer should say the rationale was not clearly stated.
+- The answer references the same decision (not a different one).
+- If the original Slack messages included rationale, it's mentioned.
+- If no rationale was stated, the agent says so honestly.
 
-### Test 9: Service Failure Fallback
+---
 
-Temporarily break the Backboard configuration (for example, use an invalid API key) and ask:
+## Test 9: Chat — Service Failure Fallback
 
-```text
-What decisions have we made about the queue?
+**Steps:**
+
+1. Temporarily set an invalid `BACKBOARD_API_KEY` in your `.env` and restart the backend.
+2. Ask in chat:
+
+```
+What decisions have we made recently?
 ```
 
-Expected result:
+3. After testing, restore the real API key and restart.
 
-- The backend logs should show the real Backboard error with traceback.
-- The chat endpoint should still return a fallback answer based on direct database search when possible.
-- The UI should not only show "Sorry, something went wrong while investigating."
+**Expected:**
 
-## Correlation Merge Tests
+- Backend logs show the Backboard error with a traceback.
+- The chat still returns a useful fallback answer from direct DB search.
+- The UI does **not** just show "Sorry, something went wrong."
 
-### Test 10: Two Related Decisions Merge
+---
 
-Within 24 hours, send these two Slack messages:
+## Test 10: Two Related Decisions Merge
 
-```text
-We've decided to standardize on Grafana Cloud for service dashboards.
-Final decision: Grafana Cloud will be our default monitoring stack.
+**Steps:**
+
+1. Send this message:
+
+```
+We've decided to use Prometheus for all backend service metrics collection.
 ```
 
-Expected result:
+2. Wait 30 seconds, then send:
 
-- Two decision KOs may be created initially.
-- When `run_correlation_async()` runs, the pair should merge if their score exceeds `0.6`.
-- The lower-confidence KO should be marked as `merged`.
-
-### Test 11: Similar Time, Different Topic, No Merge
-
-Within the same 24-hour window, send:
-
-```text
-We've decided to standardize on Grafana Cloud for service dashboards.
-We've decided to move frontend deployment to Cloudflare Pages.
+```
+Final decision: Prometheus will be our standard metrics and alerting stack going forward.
 ```
 
-Expected result:
+3. Wait for the correlation job to run (every 2 minutes), or trigger it manually.
 
-- Both decisions are ingested.
-- They should remain separate KOs unless there is unusually strong overlapping evidence.
+**Expected:**
 
-## Negative Tests
+- Two KOs appear initially.
+- After correlation runs, the lower-confidence KO is marked as `merged`.
+- Only one active KO remains on the Knowledge page.
 
-### Test 12: Casual Slack Messages Should Not Create KOs
+---
 
-Send these exact messages:
+## Test 11: Different Topics Do Not Merge
 
-```text
-Can someone review my PR?
-Lunch at 12?
-The staging server looks slow today.
+**Steps:**
+
+1. Send these two messages 30 seconds apart:
+
+```
+We've decided to use Prometheus for all backend service metrics collection.
 ```
 
-Expected result:
+```
+We've decided to replace our REST API gateway with GraphQL using Apollo Server.
+```
 
-- The pre-filter should reject them, or the classifier should mark them as non-significant.
-- No KO should be created.
+**Expected:**
 
-### Test 13: Vague Discussion Without A Decision
+- Both KOs stay `active` — they are not merged.
+
+---
+
+## Test 12: Casual Messages Do Not Create KOs
+
+**Steps:**
+
+Send each of these as separate messages:
+
+```
+Has anyone tried the new cafe downstairs?
+```
+
+```
+Can someone review my PR when you get a chance?
+```
+
+```
+The staging deploy is taking forever today.
+```
+
+**Expected:**
+
+- No KOs are created for any of these.
+- The pre-filter rejects them (check backend logs for `PRE-FILTER rejected`).
+
+---
+
+## Test 13: Vague Discussion Does Not Create a KO
+
+**Steps:**
 
 Send:
 
-```text
-We should probably compare Auth0 and Clerk again this week.
+```
+We should probably evaluate Pulumi vs Terraform again before the next infra sprint.
 ```
 
-Expected result:
+**Expected:**
 
-- This may pass the pre-filter because it is technical discussion.
-- The classifier should still reject it as not yet a decision, approval, change, or blocker.
-- No decision KO should be stored.
+- May pass the pre-filter (technical language).
+- The classifier rejects it — no firm decision was made.
+- No KO is created.
 
-## What To Inspect After Each Test
+---
 
-- In the Knowledge feed, click the decision card to open the detail page, then use `Show Context` in the `Decision Context` panel to verify whether context was captured.
-- Backend logs for detailed chat or Slack API errors.
-- The `events` table for enriched `metadata`.
-- The `knowledge_objects` table for new or merged KOs.
-- The `knowledge_events` table for source-event and GitHub-evidence links.
-- Chat UI output for fallback behavior and useful answers.
+## Quick Inspection Checklist
+
+After each test, you can verify:
+
+| What to check | Where |
+|---|---|
+| KO appeared or not | Knowledge page in the UI |
+| Context messages captured | KO detail page → Show Context |
+| Attachments captured | KO detail page → Show Context → Attachments section |
+| GitHub evidence linked | KO detail page → Show Context → look for `github_evidence` badge |
+| Actor name resolved | KO detail page → Show Context → Author field |
+| Backend processing logs | Terminal running the backend |
+| Dynamic context update | KO detail page auto-refreshes every 5s |
 
 ## Regression Checklist
 
-1. Slack webhook still returns `{"ok": true}` quickly and does not block on long processing.
-2. Existing GitHub ingestion still creates or links events normally.
-3. Chat history still persists user and assistant messages.
-4. No raw datetime objects appear in agent tool responses.
+After all tests pass:
+
+1. Slack webhook still returns `{"ok": true}` quickly (no blocking).
+2. GitHub ingestion creates or links events normally.
+3. Chat history persists across page navigation.
+4. No raw datetime objects in agent tool responses.
+5. Existing KOs from Test 1 are not corrupted by later tests.
