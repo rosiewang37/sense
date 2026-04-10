@@ -1,8 +1,101 @@
 """CRUD operations for events and knowledge objects (Backboard layer)."""
+import re
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.backboard.models import Event, KnowledgeObject, VerificationCheck
+from app.sense.knowledge_types import canonicalize_knowledge_type, equivalent_knowledge_types
+
+_SEARCH_TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
+_SEARCH_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "did", "do", "for", "from",
+    "have", "how", "i", "if", "in", "into", "is", "it", "its", "me", "my",
+    "of", "on", "or", "our", "that", "the", "their", "them", "there", "to",
+    "us", "was", "we", "what", "when", "where", "which", "who", "why", "with",
+}
+
+
+def _normalize_search_tokens(*parts: str | None) -> set[str]:
+    """Normalize free text into keyword tokens for lightweight ranking."""
+    tokens: set[str] = set()
+    for part in parts:
+        if not part:
+            continue
+        for token in _SEARCH_TOKEN_PATTERN.findall(part.lower()):
+            if len(token) < 2 or token in _SEARCH_STOPWORDS:
+                continue
+            tokens.add(token)
+    return tokens
+
+
+def _knowledge_search_parts(ko: KnowledgeObject) -> list[str]:
+    """Build a searchable text bundle for a KO."""
+    parts = [ko.title or "", ko.summary or ""]
+    detail = ko.detail or {}
+    if isinstance(detail, dict):
+        for key in ("statement", "rationale"):
+            value = detail.get(key)
+            if isinstance(value, str):
+                parts.append(value)
+        for key in ("alternatives_considered", "expected_follow_ups"):
+            for value in detail.get(key) or []:
+                if isinstance(value, str):
+                    parts.append(value)
+        for entry in detail.get("related_context") or []:
+            if isinstance(entry, dict):
+                content = entry.get("content")
+                if isinstance(content, str):
+                    parts.append(content)
+    for tag in ko.tags or []:
+        if isinstance(tag, str):
+            parts.append(tag)
+    return parts
+
+
+def _event_search_parts(event: Event) -> list[str]:
+    """Build a searchable text bundle for a raw event."""
+    metadata = event.metadata_ or {}
+    parts = [event.content or "", event.actor_name or ""]
+    for key in ("repo", "ref", "url"):
+        value = metadata.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+    for attachment in metadata.get("attachments") or []:
+        if isinstance(attachment, dict):
+            for key in ("name", "filetype", "mimetype"):
+                value = attachment.get(key)
+                if isinstance(value, str):
+                    parts.append(value)
+    return parts
+
+
+def _match_score(query: str, candidate_parts: list[str]) -> float:
+    """Return a simple relevance score based on keyword overlap."""
+    query_tokens = _normalize_search_tokens(query)
+    if not query_tokens:
+        return 0.0
+
+    candidate_tokens = _normalize_search_tokens(*candidate_parts)
+    if not candidate_tokens:
+        return 0.0
+
+    shared = query_tokens & candidate_tokens
+    if not shared:
+        return 0.0
+
+    exact_phrase_bonus = 0.0
+    joined = " ".join(candidate_parts).lower()
+    ordered_query_tokens = [
+        token
+        for token in _SEARCH_TOKEN_PATTERN.findall(query.lower())
+        if len(token) >= 2 and token not in _SEARCH_STOPWORDS
+    ]
+    query_text = " ".join(ordered_query_tokens)
+    if query_text and query_text in joined:
+        exact_phrase_bonus = 0.5
+
+    return len(shared) + (len(shared) / len(query_tokens)) + exact_phrase_bonus
 
 
 async def store_event(db: AsyncSession, event_data: dict) -> Event:
@@ -37,7 +130,7 @@ async def store_event(db: AsyncSession, event_data: dict) -> Event:
 async def store_knowledge_object(db: AsyncSession, ko_data: dict) -> KnowledgeObject:
     """Create a new Knowledge Object."""
     ko = KnowledgeObject(
-        type=ko_data["type"],
+        type=canonicalize_knowledge_type(ko_data["type"]),
         title=ko_data["title"],
         summary=ko_data.get("summary"),
         detail=ko_data.get("detail"),
@@ -99,6 +192,7 @@ async def search_knowledge_objects(
     db: AsyncSession,
     query: str,
     type_filter: str | None = None,
+    project_id: str | None = None,
     limit: int = 5,
 ) -> list[dict]:
     """Full-text search over knowledge objects by title + summary.
@@ -107,32 +201,41 @@ async def search_knowledge_objects(
     """
     stmt = select(KnowledgeObject).where(KnowledgeObject.status != "merged")
     if type_filter and type_filter != "any":
-        stmt = stmt.where(KnowledgeObject.type == type_filter)
-    stmt = stmt.order_by(KnowledgeObject.detected_at.desc()).limit(limit * 4)
+        matched_types = equivalent_knowledge_types(type_filter)
+        stmt = stmt.where(KnowledgeObject.type.in_(matched_types))
+    if project_id:
+        stmt = stmt.where(KnowledgeObject.project_id == project_id)
+    stmt = stmt.order_by(KnowledgeObject.detected_at.desc()).limit(limit * 6)
 
     result = await db.execute(stmt)
     kos = result.scalars().all()
 
-    # Client-side text match (no full-text index yet)
-    query_lower = query.lower()
     scored = []
     for ko in kos:
-        text = f"{ko.title or ''} {ko.summary or ''}".lower()
-        if any(word in text for word in query_lower.split()):
-            scored.append(ko)
+        match_score = _match_score(query, _knowledge_search_parts(ko))
+        if match_score > 0:
+            scored.append((match_score, ko))
 
+    scored.sort(
+        key=lambda item: (
+            item[0],
+            item[1].detected_at or "",
+        ),
+        reverse=True,
+    )
     scored = scored[:limit]
     return [
         {
             "id": str(ko.id),
-            "type": ko.type,
+            "type": canonicalize_knowledge_type(ko.type),
             "title": ko.title,
             "summary": ko.summary,
             "confidence": ko.confidence,
             "status": ko.status,
             "detected_at": ko.detected_at.isoformat() if hasattr(ko.detected_at, "isoformat") else str(ko.detected_at or ""),
+            "match_score": score,
         }
-        for ko in scored
+        for score, ko in scored
     ]
 
 
@@ -140,6 +243,7 @@ async def search_events(
     db: AsyncSession,
     query: str,
     source: str | None = None,
+    project_id: str | None = None,
     limit: int = 5,
 ) -> list[dict]:
     """Full-text search over raw ingested events.
@@ -149,18 +253,26 @@ async def search_events(
     stmt = select(Event)
     if source and source != "any":
         stmt = stmt.where(Event.source == source)
-    stmt = stmt.order_by(Event.ingested_at.desc()).limit(limit * 4)
+    if project_id:
+        stmt = stmt.where(Event.project_id == project_id)
+    stmt = stmt.order_by(Event.ingested_at.desc()).limit(limit * 6)
 
     result = await db.execute(stmt)
     events = result.scalars().all()
 
-    query_lower = query.lower()
     scored = []
     for ev in events:
-        text = (ev.content or "").lower()
-        if any(word in text for word in query_lower.split()):
-            scored.append(ev)
+        match_score = _match_score(query, _event_search_parts(ev))
+        if match_score > 0:
+            scored.append((match_score, ev))
 
+    scored.sort(
+        key=lambda item: (
+            item[0],
+            item[1].ingested_at or "",
+        ),
+        reverse=True,
+    )
     scored = scored[:limit]
     return [
         {
@@ -170,8 +282,9 @@ async def search_events(
             "actor_name": ev.actor_name,
             "content": (ev.content or "")[:500],
             "occurred_at": ev.occurred_at.isoformat() if hasattr(ev.occurred_at, "isoformat") else str(ev.occurred_at or ""),
+            "match_score": score,
         }
-        for ev in scored
+        for score, ev in scored
     ]
 
 

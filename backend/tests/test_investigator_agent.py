@@ -8,8 +8,12 @@ Tests:
 - Agent says unknown when no data found
 """
 import pytest
+
+from app.backboard.models import KnowledgeEvent
+from app.backboard.store import store_event, store_knowledge_object
 from app.sense.agents.investigator import (
     run_query_agent,
+    _build_grounded_answer,
     QUERY_AGENT_TOOLS,
     MAX_TOOL_CALLS,
 )
@@ -114,3 +118,82 @@ async def test_agent_says_unknown_when_no_data():
         mock_final_answer="I don't have information about a quantum flux capacitor in your project history.",
     )
     assert "don't have" in result["answer"].lower() or "no information" in result["answer"].lower()
+
+
+@pytest.mark.asyncio
+async def test_grounded_answer_uses_rationale_and_sources(db_session, monkeypatch):
+    """Direct answers should use KO rationale and return sources separately."""
+
+    class SessionContext:
+        def __init__(self, session):
+            self._session = session
+
+        async def __aenter__(self):
+            return self._session
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class SessionFactory:
+        def __init__(self, session):
+            self._session = session
+
+        def __call__(self):
+            return SessionContext(self._session)
+
+    ko = await store_knowledge_object(
+        db_session,
+        {
+            "type": "decision",
+            "title": "Move the primary database to Supabase",
+            "summary": "The team moved the primary database to Supabase.",
+            "detail": {
+                "statement": "We moved the primary database to Supabase.",
+                "rationale": "it gives us built-in auth and reduces operational overhead",
+                "alternatives_considered": ["Keep self-hosted Postgres"],
+                "expected_follow_ups": ["Migrate auth flows"],
+            },
+            "participants": [{"email": "", "name": "Alice", "role": "author"}],
+            "tags": ["database", "supabase"],
+            "confidence": 0.91,
+            "occurred_at": "2026-02-20T15:00:00Z",
+            "project_id": None,
+        },
+    )
+    event = await store_event(
+        db_session,
+        {
+            "source": "slack",
+            "source_id": "supabase_decision_ts",
+            "event_type": "message",
+            "actor_email": None,
+            "actor_name": "Alice",
+            "content": "Final decision: we're moving the primary database to Supabase for built-in auth and less ops overhead.",
+            "metadata": {"channel": "C-DB"},
+            "raw_payload": {},
+            "occurred_at": "2026-02-20T15:00:00Z",
+            "project_id": None,
+        },
+    )
+    db_session.add(
+        KnowledgeEvent(
+            knowledge_id=str(ko.id),
+            event_id=str(event.id),
+            relevance=1.0,
+            relationship_="source_event",
+        )
+    )
+    await db_session.flush()
+
+    monkeypatch.setattr("app.database.get_session_factory", lambda: SessionFactory(db_session))
+
+    result = await _build_grounded_answer(
+        question="Why did we change the database to Supabase?",
+        project_id=None,
+    )
+
+    assert result is not None
+    assert "because" in result["answer"].lower()
+    assert "built-in auth" in result["answer"].lower()
+    assert result["sources"][0]["type"] == "knowledge_object"
+    assert any(source["type"] == "event" for source in result["sources"][1:])

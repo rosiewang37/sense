@@ -90,7 +90,7 @@ def test_classification_strips_markdown_fences():
     """JSON wrapped in markdown code fences is parsed correctly."""
     result = parse_classification_response(CLASSIFICATION_WITH_EXTRA)
     assert result["is_significant"] is True
-    assert result["type"] == "change"
+    assert result["type"] == "decision"
 
 
 # --- Extraction Parsing ---
@@ -139,6 +139,7 @@ def test_extraction_handles_missing_fields():
     """Missing optional fields → None, not crash."""
     result = parse_extraction_response(EXTRACTION_MISSING_FIELDS)
     assert result["title"] == "Quick BOM update"
+    assert result["type"] == "decision"
     detail = result["detail"]
     assert detail.get("rationale") is None
     assert detail.get("alternatives_considered") is None or detail.get("alternatives_considered") == []

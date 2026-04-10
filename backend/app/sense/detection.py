@@ -7,6 +7,8 @@ import json
 import logging
 import re
 
+from app.sense.knowledge_types import canonicalize_knowledge_type
+
 logger = logging.getLogger(__name__)
 
 # --- Pre-filter (Rule-Based, No LLM Cost) ---
@@ -45,13 +47,13 @@ def pre_filter(text: str) -> bool:
 
 CLASSIFICATION_PROMPT = """You classify engineering team events by significance.
 Given an event from a collaboration tool, determine if it represents
-a significant engineering moment (decision, change, approval, blocker).
+a significant engineering moment (decision, approval, blocker).
 
 Respond with JSON:
 {{
   "is_significant": true/false,
   "confidence": 0.0-1.0,
-  "type": "decision|change|approval|blocker|context|none",
+  "type": "decision|approval|blocker|context|none",
   "brief_reason": "why"
 }}
 
@@ -80,7 +82,7 @@ def parse_classification_response(response_text: str) -> dict:
         return {
             "is_significant": bool(data.get("is_significant", False)),
             "confidence": float(data.get("confidence", 0.0)),
-            "type": data.get("type", "none"),
+            "type": canonicalize_knowledge_type(data.get("type", "none")),
             "brief_reason": data.get("brief_reason", ""),
         }
     except (json.JSONDecodeError, ValueError, TypeError):
@@ -105,9 +107,9 @@ Extract as JSON:
 {{
   "title": "short descriptive title",
   "summary": "1-2 sentence summary",
-  "type": "decision|change|approval|blocker",
+  "type": "decision|approval|blocker",
   "detail": {{
-    "statement": "the specific decision/change/approval",
+    "statement": "the specific decision or approved action",
     "rationale": "why (if stated)",
     "alternatives_considered": ["if any mentioned"],
     "expected_follow_ups": ["what actions should follow from this"]
@@ -148,7 +150,7 @@ def parse_extraction_response(response_text: str) -> dict | None:
     return {
         "title": data.get("title", "Untitled"),
         "summary": data.get("summary"),
-        "type": data.get("type", "context"),
+        "type": canonicalize_knowledge_type(data.get("type", "context")),
         "detail": detail,
         "tags": data.get("tags", []),
     }
@@ -275,6 +277,10 @@ async def run_extraction_pipeline(
     context_text, context_participants = _format_context_for_extraction(event)
     if context_text:
         logger.info(f"[pipeline] CONTEXT: {len(context_participants)} participants, {len(context_text)} chars of context")
+        print(f"[SENSE] _format_context_for_extraction: {len((event.get('metadata') or {}).get('context_messages') or [])} context messages, {len(context_participants)} participants", flush=True)
+    else:
+        context_text = "No surrounding conversation context was available. Extract based on the message content alone."
+        logger.info("[pipeline] CONTEXT: empty — using no-context fallback prompt")
 
     # Step 3: Extraction
     if mock_extract_response:

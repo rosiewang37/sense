@@ -8,6 +8,7 @@ from app.api.auth import get_current_user
 from app.database import get_db
 from app.backboard.models import Event, KnowledgeEvent, KnowledgeObject, VerificationCheck
 from app.models.user import User
+from app.sense.knowledge_types import canonicalize_knowledge_type, equivalent_knowledge_types
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 
@@ -48,7 +49,7 @@ async def list_knowledge(
     query = select(KnowledgeObject)
 
     if type:
-        query = query.where(KnowledgeObject.type == type)
+        query = query.where(KnowledgeObject.type.in_(equivalent_knowledge_types(type)))
     if status:
         query = query.where(KnowledgeObject.status == status)
     if project_id:
@@ -78,7 +79,7 @@ async def list_knowledge(
 
         items.append({
             "id": str(ko.id),
-            "type": ko.type,
+            "type": canonicalize_knowledge_type(ko.type),
             "title": ko.title,
             "summary": ko.summary,
             "detail": ko.detail,
@@ -139,7 +140,7 @@ async def get_knowledge(
 
     return {
         "id": str(ko.id),
-        "type": ko.type,
+        "type": canonicalize_knowledge_type(ko.type),
         "title": ko.title,
         "summary": ko.summary,
         "detail": ko.detail,

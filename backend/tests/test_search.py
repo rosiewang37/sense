@@ -10,7 +10,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.backboard.models import KnowledgeObject
-from app.backboard.store import store_knowledge_object
+from app.backboard.store import search_knowledge_objects, store_knowledge_object
 from app.backboard.tools import search_knowledge_base
 
 
@@ -76,3 +76,26 @@ async def test_context_formatting(db_session: AsyncSession):
     assert "title" in result
     assert "summary" in result
     assert result["type"] == "approval"
+
+
+@pytest.mark.asyncio
+async def test_change_filter_maps_to_decision(db_session: AsyncSession):
+    """Legacy 'change' filters should still return canonical decision records."""
+    await store_knowledge_object(db_session, {
+        "type": "change",
+        "title": "Move database to Supabase",
+        "summary": "Replaced the old database stack with Supabase.",
+        "confidence": 0.9,
+        "tags": ["database", "supabase"],
+    })
+    await db_session.flush()
+
+    results = await search_knowledge_objects(
+        db_session,
+        query="supabase database",
+        type_filter="change",
+        limit=5,
+    )
+
+    assert len(results) == 1
+    assert results[0]["type"] == "decision"

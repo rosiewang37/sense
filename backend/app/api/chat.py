@@ -85,6 +85,7 @@ async def chat_query(
                 role="assistant",
                 content=answer,
                 agent_reasoning=steps if steps else None,
+                sources=sources if sources else None,
             )
             db.add(agent_msg)
             await db.commit()

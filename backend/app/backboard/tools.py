@@ -7,6 +7,7 @@ from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.backboard.models import Event, KnowledgeObject, VerificationCheck
+from app.sense.knowledge_types import canonicalize_knowledge_type, equivalent_knowledge_types
 
 
 async def search_events_by_content(
@@ -94,7 +95,7 @@ async def search_knowledge_base(
     stmt = select(KnowledgeObject).where(KnowledgeObject.status == "active")
 
     if type_filter != "any":
-        stmt = stmt.where(KnowledgeObject.type == type_filter)
+        stmt = stmt.where(KnowledgeObject.type.in_(equivalent_knowledge_types(type_filter)))
     if project_id:
         stmt = stmt.where(KnowledgeObject.project_id == project_id)
 
@@ -113,7 +114,7 @@ async def search_knowledge_base(
     return [
         {
             "id": str(ko.id),
-            "type": ko.type,
+            "type": canonicalize_knowledge_type(ko.type),
             "title": ko.title,
             "summary": ko.summary,
             "confidence": ko.confidence,
@@ -135,7 +136,7 @@ async def get_knowledge_detail(db: AsyncSession, knowledge_id: str) -> dict | No
 
     return {
         "id": str(ko.id),
-        "type": ko.type,
+        "type": canonicalize_knowledge_type(ko.type),
         "title": ko.title,
         "summary": ko.summary,
         "detail": ko.detail,

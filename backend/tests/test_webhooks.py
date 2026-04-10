@@ -48,6 +48,18 @@ SLACK_REACTION_PAYLOAD = {
     "team_id": "T11111",
 }
 
+SLACK_FILE_SHARED_PAYLOAD = {
+    "type": "event_callback",
+    "event": {
+        "type": "file_shared",
+        "user_id": "U12345",
+        "file_id": "F99999",
+        "channel_id": "C98765",
+        "event_ts": "1708444325.000200",
+    },
+    "team_id": "T11111",
+}
+
 
 def test_slack_message_parsing():
     """Raw Slack message payload → normalized Event dict."""
@@ -65,6 +77,18 @@ def test_slack_reaction_parsing():
     assert event["source"] == "slack"
     assert event["event_type"] == "reaction_added"
     assert "white_check_mark" in event["content"]
+
+
+def test_slack_file_shared_parsing():
+    """file_shared payloads should still capture the channel and file ID."""
+    event = parse_slack_event(SLACK_FILE_SHARED_PAYLOAD)
+    assert event["source"] == "slack"
+    assert event["event_type"] == "file_shared"
+    assert event["source_id"] == "1708444325.000200"
+    assert event["actor_name"] == "U12345"
+    assert event["metadata"]["channel"] == "C98765"
+    assert event["metadata"]["file_ids"] == ["F99999"]
+    assert "F99999" in event["content"]
 
 
 # --- GitHub Event Parsing ---

@@ -1,4 +1,5 @@
 """Slack Web API helpers for enriching ingested Slack events."""
+import asyncio
 import logging
 
 import httpx
@@ -8,33 +9,63 @@ USER_NAME_CACHE: dict[str, str] = {}
 
 logger = logging.getLogger(__name__)
 
+# HTTP status codes worth retrying (transient errors)
+_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
-async def _slack_get(endpoint: str, bot_token: str, params: dict) -> dict | None:
-    """Call a Slack Web API GET endpoint and return the parsed JSON body."""
+
+async def _slack_get(endpoint: str, bot_token: str, params: dict, *, _retries: int = 1) -> dict | None:
+    """Call a Slack Web API GET endpoint and return the parsed JSON body.
+
+    Retries once on transient HTTP errors (429, 5xx) with a 2s delay.
+    """
     if not bot_token:
+        print(f"[SENSE] _slack_get({endpoint}): skipped — no bot_token", flush=True)
         return None
 
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(
-                f"{SLACK_API_BASE}/{endpoint}",
-                headers={"Authorization": f"Bearer {bot_token}"},
-                params=params,
-            )
-            response.raise_for_status()
-            data = response.json()
-    except httpx.HTTPError as exc:
-        logger.warning("Slack API request failed for %s: %s", endpoint, exc)
+    print(f"[SENSE] _slack_get({endpoint}): calling...", flush=True)
+    last_exc = None
+    for attempt in range(_retries + 1):
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    f"{SLACK_API_BASE}/{endpoint}",
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                    params=params,
+                )
+                if response.status_code in _RETRYABLE_STATUS_CODES and attempt < _retries:
+                    print(f"[SENSE] _slack_get({endpoint}): retryable status {response.status_code}, retrying in 2s...", flush=True)
+                    logger.info("Slack API %s returned %s, retrying...", endpoint, response.status_code)
+                    await asyncio.sleep(2)
+                    continue
+                response.raise_for_status()
+                data = response.json()
+                break
+        except httpx.HTTPError as exc:
+            last_exc = exc
+            if attempt < _retries:
+                print(f"[SENSE] _slack_get({endpoint}): HTTP error — {exc}, retrying in 2s...", flush=True)
+                logger.info("Slack API %s failed with %s, retrying...", endpoint, exc)
+                await asyncio.sleep(2)
+                continue
+            print(f"[SENSE] _slack_get({endpoint}): HTTP error — {exc} (no retries left)", flush=True)
+            logger.warning("Slack API request failed for %s: %s", endpoint, exc)
+            return None
+    else:
+        print(f"[SENSE] _slack_get({endpoint}): all retries exhausted", flush=True)
+        logger.warning("Slack API request failed for %s after retries: %s", endpoint, last_exc)
         return None
 
     if not data.get("ok", False):
+        error = data.get("error", "unknown_error")
+        print(f"[SENSE] _slack_get({endpoint}): API error — {error}", flush=True)
         logger.warning(
             "Slack API returned an error for %s: %s",
             endpoint,
-            data.get("error", "unknown_error"),
+            error,
         )
         return None
 
+    print(f"[SENSE] _slack_get({endpoint}): ok", flush=True)
     return data
 
 
@@ -43,15 +74,19 @@ async def resolve_user_name(user_id: str, bot_token: str) -> str:
     if not user_id:
         return ""
     if user_id in USER_NAME_CACHE:
-        return USER_NAME_CACHE[user_id]
+        cached = USER_NAME_CACHE[user_id]
+        print(f"[SENSE] resolve_user_name({user_id}): cache hit → '{cached}'", flush=True)
+        return cached
 
     # If it does not look like a Slack user ID, treat it as already human-readable.
     if not user_id.startswith(("U", "W")):
+        print(f"[SENSE] resolve_user_name({user_id}): not a Slack ID, treating as display name", flush=True)
         USER_NAME_CACHE[user_id] = user_id
         return user_id
 
     data = await _slack_get("users.info", bot_token, {"user": user_id})
     if not data:
+        print(f"[SENSE] resolve_user_name({user_id}): API failed — returning raw ID", flush=True)
         return user_id
 
     user = data.get("user") or {}
@@ -64,6 +99,7 @@ async def resolve_user_name(user_id: str, bot_token: str) -> str:
         or user_id
     )
     USER_NAME_CACHE[user_id] = display_name
+    print(f"[SENSE] resolve_user_name({user_id}): resolved → '{display_name}'", flush=True)
     return display_name
 
 
@@ -74,7 +110,13 @@ async def fetch_surrounding_messages(
     window: int = 3,
 ) -> list[dict]:
     """Fetch a best-effort slice of nearby channel messages around a message timestamp."""
+    print(f"[SENSE] fetch_surrounding_messages(channel={channel}, ts={message_ts}, window={window})", flush=True)
     if not channel or not message_ts or not bot_token:
+        missing = []
+        if not channel: missing.append("channel")
+        if not message_ts: missing.append("message_ts")
+        if not bot_token: missing.append("bot_token")
+        print(f"[SENSE] fetch_surrounding_messages: skipped — missing {', '.join(missing)}", flush=True)
         return []
 
     before_data = await _slack_get(
@@ -98,6 +140,10 @@ async def fetch_surrounding_messages(
         },
     )
 
+    before_count = len((before_data or {}).get("messages", []))
+    after_count = len((after_data or {}).get("messages", []))
+    print(f"[SENSE] fetch_surrounding_messages: before_api={before_count} msgs, after_api={after_count} msgs", flush=True)
+
     raw_messages: dict[str, dict] = {}
     for payload in (before_data, after_data):
         for message in (payload or {}).get("messages", []):
@@ -106,6 +152,7 @@ async def fetch_surrounding_messages(
                 raw_messages[ts] = message
 
     if not raw_messages:
+        print(f"[SENSE] fetch_surrounding_messages: no messages found — returning empty", flush=True)
         return []
 
     ordered = sorted(raw_messages.values(), key=lambda item: float(item.get("ts", 0) or 0))
@@ -133,6 +180,7 @@ async def fetch_surrounding_messages(
             }
         )
 
+    print(f"[SENSE] fetch_surrounding_messages: returning {len(enriched)} enriched messages", flush=True)
     return enriched
 
 

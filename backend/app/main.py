@@ -40,12 +40,23 @@ async def lifespan(app: FastAPI):
     scheduler = None
     try:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
-        from app.sense.tasks import run_correlation_async
+        from app.sense.tasks import run_correlation_async, poll_gmail_messages
 
         scheduler = AsyncIOScheduler()
         scheduler.add_job(run_correlation_async, "interval", seconds=120, id="correlation-scan")
-        scheduler.start()
         logger.info("APScheduler started: correlation scan every 2 minutes")
+
+        # Gmail polling (disabled by default — enable via GMAIL_POLL_ENABLED=true)
+        if settings.gmail_poll_enabled:
+            scheduler.add_job(
+                poll_gmail_messages,
+                "interval",
+                seconds=settings.gmail_poll_interval_seconds,
+                id="gmail-poll",
+            )
+            logger.info(f"Gmail polling enabled: every {settings.gmail_poll_interval_seconds}s")
+
+        scheduler.start()
     except Exception as e:
         logger.warning(f"APScheduler not started: {e}")
 

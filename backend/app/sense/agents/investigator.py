@@ -13,15 +13,17 @@ MAX_TOOL_CALLS = 8
 QUERY_AGENT_SYSTEM_PROMPT = """You are Sense, an investigative engineering memory assistant.
 
 When a user asks a question about their project history, you have tools to investigate:
-1. Search the structured knowledge base (decisions, changes, approvals)
+1. Search the structured knowledge base (decisions, approvals; implementation changes are stored as decisions)
 2. Search raw events (Slack messages, GitHub commits)
 3. Get full details of a specific knowledge object
 4. Get verification status of a knowledge object
 
 Investigation approach:
 - Start with search_knowledge_base. If the answer is clear, respond directly.
+- If the user asks "why", "how", or asks for rationale, you must call get_knowledge_detail on the best match before answering.
 - If incomplete, search raw events for more context.
 - If you find a relevant knowledge object, check its verification status.
+- Answer the user's question directly. Do not just summarize search results or say what tools you used.
 - Always cite your sources with [KO:id] for knowledge objects and [Event:id] for raw events.
 - If you cannot find the answer, say so clearly.
 - Never fabricate information. Only report what the evidence shows."""
@@ -31,7 +33,7 @@ QUERY_AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "search_knowledge_base",
-            "description": "Search the structured knowledge base for decisions, changes, and approvals.",
+            "description": "Search the structured knowledge base for decisions and approvals (changes are stored as decisions).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -96,7 +98,7 @@ QUERY_AGENT_TOOLS = [
 ]
 
 
-async def _execute_tool(name: str, args: dict) -> str:
+async def _execute_tool(name: str, args: dict, project_id: str | None = None) -> str:
     """Execute a tool call and return the result as a JSON string.
 
     Each tool is wrapped in try/except so a single tool failure doesn't
@@ -118,6 +120,7 @@ async def _execute_tool(name: str, args: dict) -> str:
                     db,
                     query=args.get("query", ""),
                     type_filter=args.get("type_filter"),
+                    project_id=project_id,
                     limit=args.get("limit", 5),
                 )
                 return json.dumps({"results": results})
@@ -127,6 +130,7 @@ async def _execute_tool(name: str, args: dict) -> str:
                     db,
                     query=args.get("query", ""),
                     source=args.get("source"),
+                    project_id=project_id,
                     limit=args.get("limit", 5),
                 )
                 return json.dumps({"results": results})
@@ -161,6 +165,132 @@ async def _execute_tool(name: str, args: dict) -> str:
     except Exception as e:
         logger.error(f"Tool execution error ({name}): {e}", exc_info=True)
         return json.dumps({"error": f"Tool '{name}' failed: {str(e)}"})
+
+
+def _pick_preferred_knowledge_id(steps: list[dict]) -> str | None:
+    """Extract the most likely KO ID from prior tool steps."""
+    for step in reversed(steps):
+        tool_name = step.get("tool")
+        if tool_name == "get_knowledge_detail":
+            result = step.get("result") or {}
+            if isinstance(result, dict) and result.get("id"):
+                return str(result["id"])
+            args = step.get("args") or {}
+            if isinstance(args, dict) and args.get("knowledge_id"):
+                return str(args["knowledge_id"])
+
+        if tool_name == "search_knowledge_base":
+            result = step.get("result") or {}
+            results = result.get("results") if isinstance(result, dict) else None
+            if isinstance(results, list) and results:
+                first = results[0]
+                if isinstance(first, dict) and first.get("id"):
+                    return str(first["id"])
+
+    return None
+
+
+def _ensure_sentence(text: str | None) -> str:
+    """Normalize short text into a complete sentence."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return ""
+    if cleaned[-1] not in ".!?":
+        cleaned += "."
+    return cleaned
+
+
+async def _build_grounded_answer(
+    question: str,
+    project_id: str | None,
+    preferred_knowledge_id: str | None = None,
+) -> dict | None:
+    """Build a direct answer from stored KO detail plus linked sources."""
+    from sqlalchemy import select
+
+    from app.database import get_session_factory
+    from app.backboard.models import Event, KnowledgeEvent
+    from app.backboard.store import get_knowledge_object, search_knowledge_objects
+    from app.sense.knowledge_types import canonicalize_knowledge_type
+
+    question_lower = question.lower()
+
+    async with get_session_factory()() as db:
+        candidate = None
+
+        if preferred_knowledge_id:
+            candidate = await get_knowledge_object(db, preferred_knowledge_id)
+
+        if candidate is None:
+            search_results = await search_knowledge_objects(
+                db,
+                query=question,
+                project_id=project_id,
+                limit=3,
+            )
+            if not search_results:
+                return None
+
+            top = search_results[0]
+            runner_up_score = search_results[1].get("match_score", 0.0) if len(search_results) > 1 else 0.0
+            top_score = top.get("match_score", 0.0)
+            if top_score < 1.25 or (len(search_results) > 1 and top_score <= runner_up_score):
+                return None
+
+            candidate = await get_knowledge_object(db, top["id"])
+
+        if not candidate:
+            return None
+
+        detail = candidate.detail or {}
+        statement = ""
+        rationale = ""
+        if isinstance(detail, dict):
+            statement = str(detail.get("statement") or "").strip()
+            rationale = str(detail.get("rationale") or "").strip()
+
+        primary_statement = _ensure_sentence(statement or candidate.summary or candidate.title)
+
+        linked_event_result = await db.execute(
+            select(Event, KnowledgeEvent)
+            .join(KnowledgeEvent, KnowledgeEvent.event_id == Event.id)
+            .where(KnowledgeEvent.knowledge_id == str(candidate.id))
+            .order_by(Event.occurred_at.asc())
+        )
+        linked_events = linked_event_result.all()
+
+        sources = [
+            {
+                "type": "knowledge_object",
+                "id": str(candidate.id),
+                "label": f"[{canonicalize_knowledge_type(candidate.type)}] {candidate.title}",
+                "detail": candidate.summary or statement or "",
+            }
+        ]
+        for event, link in linked_events[:4]:
+            sources.append(
+                {
+                    "type": "event",
+                    "id": str(event.id),
+                    "label": f"[{link.relationship_ or event.source}] {event.actor_name or event.source}",
+                    "detail": (event.content or "")[:300],
+                }
+            )
+
+        if "why" in question_lower:
+            if rationale:
+                answer = f"{primary_statement} Because {rationale.rstrip('.')}."
+            else:
+                answer = (
+                    f"{primary_statement} I found the decision, but the stored record does not include "
+                    "an explicit rationale."
+                )
+        else:
+            answer = primary_statement
+            if rationale and ("what did we decide" in question_lower or "what change" in question_lower):
+                answer += f" Reason noted: {rationale.rstrip('.')}."
+
+        return {"answer": answer, "sources": sources}
 
 
 async def run_query_agent(
@@ -252,7 +382,7 @@ async def run_query_agent(
                             raw_args = {}
 
                     logger.info(f"Chat agent tool: {func_name}({raw_args})")
-                    tool_result = await _execute_tool(func_name, raw_args)
+                    tool_result = await _execute_tool(func_name, raw_args, project_id=project_id)
 
                     steps.append({
                         "tool": func_name,
@@ -281,17 +411,31 @@ async def run_query_agent(
                 break
 
         answer = (result or {}).get("content") or "I could not find relevant information to answer that question."
+        grounded = await _build_grounded_answer(
+            question=question,
+            project_id=project_id,
+            preferred_knowledge_id=_pick_preferred_knowledge_id(steps),
+        )
+        if grounded:
+            answer = grounded["answer"]
+            return {
+                "answer": answer,
+                "steps": steps,
+                "thread_id": thread_id,
+                "sources": grounded["sources"],
+            }
+
         return {"answer": answer, "steps": steps, "thread_id": thread_id}
 
     except httpx.HTTPStatusError as e:
         logger.error(f"Backboard API HTTP error: {e.response.status_code} — {e.response.text}", exc_info=True)
-        return await _fallback_db_search(question, thread_id, steps, "llm_http_error")
+        return await _fallback_db_search(question, thread_id, steps, "llm_http_error", project_id)
     except (httpx.ConnectError, httpx.TimeoutException) as e:
         logger.error(f"Backboard API connection error: {e}", exc_info=True)
-        return await _fallback_db_search(question, thread_id, steps, "llm_unavailable")
+        return await _fallback_db_search(question, thread_id, steps, "llm_unavailable", project_id)
     except Exception as e:
         logger.error(f"Chat agent unexpected error: {e}", exc_info=True)
-        return await _fallback_db_search(question, thread_id, steps, "unexpected_error")
+        return await _fallback_db_search(question, thread_id, steps, "unexpected_error", project_id)
 
 
 async def _fallback_db_search(
@@ -299,6 +443,7 @@ async def _fallback_db_search(
     thread_id: str | None,
     steps: list,
     error_type: str,
+    project_id: str | None,
 ) -> dict:
     """Fallback: search the DB directly without LLM reasoning.
 
@@ -308,8 +453,36 @@ async def _fallback_db_search(
     """
     logger.info(f"Running fallback DB search (reason: {error_type})")
     try:
-        ko_result = await _execute_tool("search_knowledge_base", {"query": question, "limit": 5})
-        event_result = await _execute_tool("search_raw_events", {"query": question, "limit": 5})
+        grounded = await _build_grounded_answer(
+            question=question,
+            project_id=project_id,
+            preferred_knowledge_id=_pick_preferred_knowledge_id(steps),
+        )
+        if grounded:
+            steps.append(
+                {
+                    "tool": "fallback_grounded_answer",
+                    "args": {"query": question},
+                    "result": {"sources": len(grounded["sources"])},
+                }
+            )
+            return {
+                "answer": grounded["answer"],
+                "steps": steps,
+                "thread_id": thread_id,
+                "sources": grounded["sources"],
+            }
+
+        ko_result = await _execute_tool(
+            "search_knowledge_base",
+            {"query": question, "limit": 5},
+            project_id=project_id,
+        )
+        event_result = await _execute_tool(
+            "search_raw_events",
+            {"query": question, "limit": 5},
+            project_id=project_id,
+        )
 
         ko_data = json.loads(ko_result).get("results", [])
         event_data = json.loads(event_result).get("results", [])
